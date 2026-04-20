@@ -1,0 +1,181 @@
+from datetime import datetime, timedelta, timezone
+
+from fastapi import HTTPException, status
+
+from app.core.config import settings
+from app.core.security import email_code_generator, password_hasher, token_service
+from app.models.user import UserDocument
+from app.repositories.user_repository import UserRepository
+from app.schemas.auth import (
+    AccessTokenResponse,
+    EmailValidationRequiredResponse,
+    EmailValidationRequest,
+    ForgotPasswordRequest,
+    ForgotPasswordVerifyRequest,
+    LoginRequest,
+    RefreshTokenRequest,
+    RegisterRequest,
+    TokenResponse,
+)
+from app.services.email_service import email_sender
+
+
+class AuthService:
+    def __init__(self, users: UserRepository) -> None:
+        self._users = users
+
+    async def register(self, payload: RegisterRequest) -> EmailValidationRequiredResponse:
+        email = payload.email.lower()
+        existing = await self._users.get_by_email(email)
+        if existing is not None and existing.is_email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email is already registered",
+            )
+
+        code = email_code_generator.generate()
+        expires_at = self._code_expiry()
+
+        if existing is None:
+            user = await self._users.create(
+                UserDocument(
+                    email=email,
+                    hashed_password=password_hasher.hash(payload.password),
+                    email_verification_code=code,
+                    email_verification_expires_at=expires_at,
+                ),
+            )
+        else:
+            user = await self._users.update_password(
+                existing.id or "",
+                password_hasher.hash(payload.password),
+            )
+            user = await self._users.set_email_validation_code(user.id or "", code, expires_at)
+
+        await email_sender.send_validation_code(email, code, "account signup")
+        return self._email_validation_response(user, code, "Email validation code sent")
+
+    async def verify_email(self, payload: EmailValidationRequest) -> TokenResponse:
+        user = await self._users.get_by_email(payload.email.lower())
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        self._assert_valid_code(
+            submitted_code=payload.code,
+            stored_code=user.email_verification_code,
+            expires_at=user.email_verification_expires_at,
+        )
+
+        verified_user = await self._users.mark_email_verified(user.id or "")
+        if verified_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return self._token_response(verified_user)
+
+    async def login(self, payload: LoginRequest) -> TokenResponse:
+        user = await self._users.get_by_email(payload.email.lower())
+        if user is None or not password_hasher.verify(payload.password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid email or password",
+            )
+        if not user.is_email_verified:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Email validation is required before sign in",
+            )
+        return self._token_response(user)
+
+    async def forgot_password(
+        self,
+        payload: ForgotPasswordRequest,
+    ) -> EmailValidationRequiredResponse:
+        email = payload.email.lower()
+        user = await self._users.get_by_email(email)
+        code = email_code_generator.generate()
+
+        if user is not None:
+            user = await self._users.set_password_reset_code(user.id or "", code, self._code_expiry())
+            await email_sender.send_validation_code(email, code, "password reset")
+
+        return self._email_validation_response(
+            user,
+            code if user is not None else None,
+            "If the email exists, a password reset validation code was generated",
+            email=email,
+        )
+
+    async def verify_forgot_password(self, payload: ForgotPasswordVerifyRequest) -> TokenResponse:
+        user = await self._users.get_by_email(payload.email.lower())
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        self._assert_valid_code(
+            submitted_code=payload.code,
+            stored_code=user.password_reset_code,
+            expires_at=user.password_reset_expires_at,
+        )
+
+        updated_user = await self._users.update_by_id(
+            user.id or "",
+            {
+                "password_reset_code": None,
+                "password_reset_expires_at": None,
+            },
+        )
+        if updated_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return self._token_response(updated_user)
+
+    async def refresh_access_token(self, payload: RefreshTokenRequest) -> AccessTokenResponse:
+        user_id = token_service.decode_subject(payload.session_token, token_type="session")
+        if user_id is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session token")
+
+        user = await self.get_user_by_id(user_id)
+        if user is None or not user.is_active:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+
+        return AccessTokenResponse(access_token=token_service.create_access_token(user.id or ""))
+
+    async def get_user_by_id(self, user_id: str) -> UserDocument | None:
+        return await self._users.get_by_id(user_id)
+
+    def _token_response(self, user: UserDocument) -> TokenResponse:
+        access_token = token_service.create_access_token(subject=user.id or "")
+        session_token = token_service.create_session_token(subject=user.id or "")
+        return TokenResponse(
+            access_token=access_token,
+            session_token=session_token,
+            user={"id": user.id or "", "email": user.email},
+        )
+
+    def _email_validation_response(
+        self,
+        user: UserDocument | None,
+        code: str | None,
+        message: str,
+        email: str | None = None,
+    ) -> EmailValidationRequiredResponse:
+        return EmailValidationRequiredResponse(
+            email=email or user.email,
+            message=message,
+        )
+
+    def _code_expiry(self) -> datetime:
+        return datetime.now(timezone.utc) + timedelta(minutes=settings.email_code_expire_minutes)
+
+    def _assert_valid_code(
+        self,
+        submitted_code: str,
+        stored_code: str | None,
+        expires_at: datetime | None,
+    ) -> None:
+        now = datetime.now(timezone.utc)
+        if expires_at is not None and expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if stored_code is None or expires_at is None or expires_at < now:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Validation code expired")
+
+        if submitted_code != stored_code:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid validation code")
