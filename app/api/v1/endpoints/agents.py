@@ -7,9 +7,13 @@ from app.models.user import UserDocument
 from app.schemas.agent import (
     AgentAICreate,
     AgentBuilderCreate,
+    AgentConfigResponse,
     AgentCreate,
     AgentDescriptionGenerateRequest,
     AgentDescriptionGenerateResponse,
+    AgentRegistryRebuildResponse,
+    AgentRouteRequest,
+    AgentRouteResponse,
     AgentResponse,
     AgentSystemPromptGenerateRequest,
     AgentSystemPromptGenerateResponse,
@@ -17,7 +21,10 @@ from app.schemas.agent import (
     AgentWelcomeMessageGenerateRequest,
     AgentWelcomeMessageGenerateResponse,
     LLMEngineOptionsResponse,
+    ToolResponse,
 )
+from app.schemas.chat import ChatSendResponse, MessageCreate
+from app.tools.registry import default_tool_registry
 
 router = APIRouter()
 
@@ -65,6 +72,52 @@ async def list_llm_engines():
     )
 
 
+@router.get("/configs", response_model=list[AgentConfigResponse])
+async def list_agent_configs(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    return await factory.agent_service.list_agent_configs(current_user)
+
+
+@router.get("/tools", response_model=list[ToolResponse])
+async def list_agent_tools():
+    registry = default_tool_registry()
+    return [
+        ToolResponse(name=tool.name, description=tool.description)
+        for tool in registry.require_many(registry.list_names())
+    ]
+
+
+@router.post("/route", response_model=AgentRouteResponse)
+async def route_agent(
+    payload: AgentRouteRequest,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    return await factory.agent_service.route_agent(
+        current_user,
+        task=payload.task,
+        agent_key=payload.agent_key,
+    )
+
+
+@router.post("/registry/rebuild", response_model=AgentRegistryRebuildResponse)
+async def rebuild_agent_registry(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    return await factory.agent_service.rebuild_registry(current_user)
+
+
+@router.post("/seed", response_model=list[AgentResponse], status_code=status.HTTP_201_CREATED)
+async def seed_default_agents(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    return await factory.agent_service.seed_default_agents(current_user)
+
+
 @router.post("/generate-description", response_model=AgentDescriptionGenerateResponse)
 async def generate_agent_description(
     payload: AgentDescriptionGenerateRequest,
@@ -96,6 +149,21 @@ async def generate_agent_welcome_message(
     _ = current_user
     welcome_message = await factory.agent_service.generate_welcome_message(payload)
     return AgentWelcomeMessageGenerateResponse(welcome_message=welcome_message)
+
+
+@router.post("/{agent_id}/chat", response_model=ChatSendResponse)
+async def chat_with_agent(
+    agent_id: str,
+    payload: MessageCreate,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    user_message, assistant_message = await factory.chat_service.send_message(
+        agent_id,
+        current_user,
+        payload.content,
+    )
+    return ChatSendResponse(user_message=user_message, assistant_message=assistant_message)
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)
