@@ -7,5 +7,9 @@ class AgentDocument(MongoDocument):
     role: str
     purpose: str
     template_type: str | None = None
+    category_tag: str | None = None
     system_prompt: str
+    welcome_message: str | None = None
+    llm_engine: str = "gpt-4o"
+    temperature: float = 0.7
     status: str = "active"

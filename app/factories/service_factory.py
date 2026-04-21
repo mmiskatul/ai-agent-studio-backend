@@ -2,6 +2,7 @@ from app.db.unit_of_work import UnitOfWork
 from app.services.agent_service import AgentService
 from app.services.auth_service import AuthService
 from app.services.chat_service import ChatService
+from app.services.knowledge_service import KnowledgeService
 from app.services.overview_service import OverviewService
 
 
@@ -26,3 +27,7 @@ class ServiceFactory:
     @property
     def overview_service(self) -> OverviewService:
         return OverviewService(self._uow.agents, self._uow.chats)
+
+    @property
+    def knowledge_service(self) -> KnowledgeService:
+        return KnowledgeService(self._uow.knowledge, self._uow.agents)

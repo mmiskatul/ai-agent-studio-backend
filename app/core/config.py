@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     smtp_use_ssl: bool = False
 
+    openai_api_key: str = ""
+    openai_agent_model: str = "gpt-4.1-mini"
+    openai_embedding_model: str = "text-embedding-3-small"
+
+    cloudinary_cloud_name: str = ""
+    cloudinary_api_key: str = ""
+    cloudinary_api_secret: str = ""
+    cloudinary_folder: str = "agenthub/knowledge"
+
     @field_validator("backend_cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: str | list[str]) -> list[str]:
