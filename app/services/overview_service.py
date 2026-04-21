@@ -1,5 +1,5 @@
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from app.models.base import now_utc
 from app.models.user import UserDocument
@@ -12,6 +12,12 @@ from app.schemas.overview import (
     OverviewResponse,
     OverviewStats,
 )
+
+
+def as_aware_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class OverviewService:
@@ -42,7 +48,9 @@ class OverviewService:
 
         active_agents = sum(1 for agent in agents if agent.status == "active")
         inactive_agents = len(agents) - active_agents
-        recently_updated_agents = sum(1 for agent in agents if agent.updated_at >= seven_days_ago)
+        recently_updated_agents = sum(
+            1 for agent in agents if as_aware_utc(agent.updated_at) >= seven_days_ago
+        )
         categories = Counter(agent.template_type or "Custom" for agent in agents)
 
         top_agents = sorted(
@@ -50,7 +58,7 @@ class OverviewService:
             key=lambda agent: (
                 query_counts_by_agent.get(agent.id or "", 0),
                 agent.status == "active",
-                agent.updated_at,
+                as_aware_utc(agent.updated_at),
             ),
             reverse=True,
         )[:5]
@@ -60,9 +68,11 @@ class OverviewService:
                 type="agent",
                 title=f"{agent.name} updated",
                 description=f"{agent.role} is currently {agent.status}.",
-                created_at=agent.updated_at,
+                created_at=as_aware_utc(agent.updated_at),
             )
-            for agent in sorted(agents, key=lambda item: item.updated_at, reverse=True)[:5]
+            for agent in sorted(agents, key=lambda item: as_aware_utc(item.updated_at), reverse=True)[
+                :5
+            ]
         ]
 
         return OverviewResponse(
@@ -83,7 +93,7 @@ class OverviewService:
                     status=agent.status,
                     category=agent.template_type or "Custom",
                     queries_30d=query_counts_by_agent.get(agent.id or "", 0),
-                    updated_at=agent.updated_at,
+                    updated_at=as_aware_utc(agent.updated_at),
                 )
                 for agent in top_agents
             ],

@@ -35,13 +35,15 @@ class Settings(BaseSettings):
     smtp_use_ssl: bool = False
 
     openai_api_key: str = ""
-    openai_agent_model: str = "gpt-4.1-mini"
-    openai_embedding_model: str = "text-embedding-3-small"
-
-    cloudinary_cloud_name: str = ""
-    cloudinary_api_key: str = ""
-    cloudinary_api_secret: str = ""
-    cloudinary_folder: str = "agenthub/knowledge"
+    openai_agent_model: str = ""
+    llm_engine_options: Annotated[list[dict[str, str]], NoDecode] = Field(
+        default_factory=lambda: [
+            {"value": "gpt-4.1-mini", "label": "GPT-4.1 mini"},
+            {"value": "gpt-4.1", "label": "GPT-4.1"},
+            {"value": "gpt-4o", "label": "GPT-4o"},
+            {"value": "gpt-4o-mini", "label": "GPT-4o mini"},
+        ]
+    )
 
     @field_validator("backend_cors_origins", mode="before")
     @classmethod
@@ -54,6 +56,26 @@ class Settings(BaseSettings):
                     return parsed_value
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
+
+    @field_validator("llm_engine_options", mode="before")
+    @classmethod
+    def parse_llm_engine_options(cls, value: str | list[dict[str, str]]) -> list[dict[str, str]]:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return []
+            parsed_value = json.loads(value)
+            if isinstance(parsed_value, list):
+                return parsed_value
+        return value
+
+    @property
+    def default_llm_engine(self) -> str:
+        if self.openai_agent_model:
+            return self.openai_agent_model
+        if self.llm_engine_options:
+            return self.llm_engine_options[0]["value"]
+        return ""
 
 
 @lru_cache
