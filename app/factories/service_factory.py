@@ -18,7 +18,7 @@ class ServiceFactory:
 
     @property
     def agent_service(self) -> AgentService:
-        return AgentService(self._uow.agents, self._uow.chats)
+        return AgentService(self._uow.agents, self._uow.chats, self._uow.messages)
 
     @property
     def chat_service(self) -> ChatService:
@@ -35,4 +35,4 @@ class ServiceFactory:
 
     @property
     def overview_service(self) -> OverviewService:
-        return OverviewService(self._uow.agents, self._uow.chats)
+        return OverviewService(self._uow.agents, self._uow.chats, self._uow.messages)

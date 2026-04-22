@@ -17,6 +17,7 @@ from app.models.chat import ChatDocument, ChatMemoryDocument, MessageDocument
 from app.models.user import UserDocument
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.chat_repository import ChatRepository
+from app.repositories.message_repository import MessageRepository
 from app.schemas.agent import (
     AgentAICreate,
     AgentBuilderCreate,
@@ -41,9 +42,15 @@ logger = getLogger(__name__)
 
 
 class AgentService:
-    def __init__(self, agents: AgentRepository, chats: ChatRepository) -> None:
+    def __init__(
+        self,
+        agents: AgentRepository,
+        chats: ChatRepository,
+        messages: MessageRepository | None = None,
+    ) -> None:
         self._agents = agents
         self._chats = chats
+        self._messages = messages
         self._response_prompt_builder = AgentResponsePromptBuilder()
 
     def parse_memory_summary(self, value: object) -> MemorySummary:
@@ -875,6 +882,15 @@ class AgentService:
         for chat_id, count in query_counts_by_chat.items():
             agent_id = chat_agent_map.get(chat_id)
             if agent_id:
+                query_counts_by_agent[agent_id] = query_counts_by_agent.get(agent_id, 0) + count
+
+        if self._messages is not None:
+            message_counts_by_agent = await self._messages.count_user_messages_by_agent(
+                user_id,
+                since=now_utc() - timedelta(days=30),
+                agent_ids=agent_ids,
+            )
+            for agent_id, count in message_counts_by_agent.items():
                 query_counts_by_agent[agent_id] = query_counts_by_agent.get(agent_id, 0) + count
         return query_counts_by_agent
 

@@ -45,6 +45,39 @@ class MessageRepository(BaseRepository[MessageRecord]):
             {"$set": {"agent_id": agent_id, "updated_at": now_utc()}},
         )
 
+    async def count_user_messages_by_agent(
+        self,
+        user_id: str,
+        *,
+        since=None,
+        agent_ids: list[str] | None = None,
+    ) -> dict[str, int]:
+        match: dict = {
+            "user_id": user_id,
+            "agent_id": {"$type": "string", "$ne": ""},
+            "$or": [{"role": "user"}, {"sender_type": "user"}],
+        }
+        if since is not None:
+            match["created_at"] = {"$gte": since}
+        if agent_ids is not None:
+            match["agent_id"]["$in"] = agent_ids
+
+        pipeline = [
+            {"$match": match},
+            {"$group": {"_id": "$agent_id", "count": {"$sum": 1}}},
+        ]
+        counts: dict[str, int] = {}
+        async for item in self.collection.aggregate(pipeline):
+            agent_id = item.get("_id")
+            if isinstance(agent_id, str) and agent_id:
+                counts[agent_id] = int(item.get("count", 0))
+        return counts
+
+    async def count_messages_by_user(self, user_id: str) -> int:
+        return await self.collection.count_documents(
+            {"user_id": user_id, "agent_id": {"$type": "string", "$ne": ""}},
+        )
+
     async def _iterate(self, cursor):
         async for item in cursor:
             message = self.document_class.from_mongo(item)
