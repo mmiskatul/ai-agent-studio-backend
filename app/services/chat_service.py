@@ -1,3 +1,5 @@
+import re
+
 from fastapi import HTTPException, status
 
 from app.agents.config import AgentConfig
@@ -169,10 +171,6 @@ class ChatService:
         chat: ChatDocument,
         content: str,
     ) -> tuple[MessageDocument, MessageDocument]:
-        title = self._build_chat_title(content)
-        await self._chats.update_chat_title(chat.id or "", title)
-        chat.title = title
-
         user_message = await self._chats.add_message(
             MessageDocument(chat_id=chat.id or "", sender_type="user", content=content),
         )
@@ -186,6 +184,10 @@ class ChatService:
                 content=assistant_content,
             ),
         )
+
+        title = self._build_chat_title_from_messages([*messages, assistant_message])
+        await self._chats.update_chat_title(chat.id or "", title)
+        chat.title = title
 
         return user_message, assistant_message
 
@@ -206,10 +208,6 @@ class ChatService:
         updated_user_message = await self._chats.update_message_content(message.id or "", content)
         if updated_user_message is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
-
-        first_user_message = await self._chats.get_first_user_message(chat.id or "")
-        if first_user_message is not None and first_user_message.id == message.id:
-            await self._chats.update_chat_title(chat.id or "", self._build_chat_title(content))
 
         messages = await self._chats.list_messages(chat.id or "")
         assistant_content = await self._generate_assistant_response(agent, content, messages)
@@ -236,6 +234,10 @@ class ChatService:
                     detail="Message not found",
                 )
 
+        messages = await self._chats.list_messages(chat.id or "")
+        title = self._build_chat_title_from_messages(messages)
+        await self._chats.update_chat_title(chat.id or "", title)
+
         return updated_user_message, assistant_message
 
     def _build_chat_title(self, content: str) -> str:
@@ -243,6 +245,37 @@ class ChatService:
         if len(title) <= 80:
             return title
         return f"{title[:77].rstrip()}..."
+
+    def _build_chat_title_from_messages(self, messages: list[MessageDocument]) -> str:
+        first_user_message = next(
+            (
+                " ".join(message.content.strip().split())
+                for message in messages
+                if message.sender_type == "user" and message.content.strip()
+            ),
+            "",
+        )
+        assistant_message = next(
+            (
+                " ".join(message.content.strip().split())
+                for message in reversed(messages)
+                if message.sender_type == "assistant" and message.content.strip()
+            ),
+            "",
+        )
+        summary_source = assistant_message or first_user_message
+        if assistant_message:
+            sentence = re.split(r"(?<=[.!?])\s+", summary_source, maxsplit=1)[0]
+            sentence = re.sub(
+                r"^(sure|here'?s|below is|this is)\s+",
+                "",
+                sentence.strip(),
+                flags=re.IGNORECASE,
+            )
+            sentence = sentence.strip(" .:-")
+            if len(sentence.split()) >= 2:
+                return self._build_chat_title(sentence)
+        return self._build_chat_title(first_user_message or "New chat")
 
     async def _ensure_chat_title(self, chat: ChatDocument) -> None:
         if chat.title:
@@ -397,7 +430,7 @@ class ChatService:
         )
 
     def _generate_fallback_response(self, agent_config: AgentConfig, message: str) -> str:
-        cleaned_message = " ".join(message.strip().split())
+        _ = message
         agent_focus = agent_config.description.strip()
         agent_text = " ".join(
             [

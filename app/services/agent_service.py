@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import timedelta
 from logging import getLogger
 
@@ -301,7 +302,7 @@ class AgentService:
             ChatDocument(
                 user_id=user.id or "",
                 agent_id=agent.id or "",
-                title=title.strip() if title and title.strip() else "New page",
+                title=title.strip() if title and title.strip() else "New chat",
             ),
         )
 
@@ -493,6 +494,84 @@ class AgentService:
             return title
         return f"{title[:77].rstrip()}..."
 
+    def _build_summary_title(self, content: str) -> str:
+        title = " ".join(content.strip().split())
+        if not title:
+            return ""
+
+        title = re.sub(
+            r"^(the\s+)?user\s+(asked|requested|wants|needs|is asking|asked for)\s+(for|to|about)?\s*",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(
+            r"^(agent|assistant|bot|system)\s+(handled|answered|responded to)\s*",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.sub(
+            r"\s+(using|with|based on|from stored|from previous|while using)\s+.*$",
+            "",
+            title,
+            flags=re.IGNORECASE,
+        )
+        title = re.split(r"(?<=[.!?])\s+", title, maxsplit=1)[0]
+        title = title.strip(" .:-")
+
+        if not title or len(title.split()) < 2:
+            return ""
+        if len(title) <= 72:
+            return title
+        return f"{title[:69].rstrip()}..."
+
+    def _is_weak_title_source(self, content: str) -> bool:
+        normalized = " ".join(content.strip().lower().split())
+        if not normalized:
+            return True
+        if normalized in {
+            "hi",
+            "hello",
+            "hey",
+            "hii",
+            "test",
+            "ok",
+            "okay",
+            "thanks",
+            "thank you",
+        }:
+            return True
+        return len(normalized.split()) < 3 and len(normalized) < 18
+
+    def _build_assistant_title(self, messages: list[MessageDocument]) -> str:
+        assistant_message = next(
+            (
+                message.content.strip()
+                for message in reversed(messages)
+                if message.sender_type == "assistant" and message.content.strip()
+            ),
+            "",
+        )
+        if not assistant_message:
+            return ""
+
+        lines = [line.strip(" #*-0123456789.\t") for line in assistant_message.splitlines()]
+        candidates = [line for line in lines if line and len(line.split()) >= 3]
+        source = candidates[0] if candidates else assistant_message
+        source = re.sub(
+            r"^(here'?s|here is|below is|this is|sure,?)\s+(a|an|the)?\s*",
+            "",
+            source.strip(),
+            flags=re.IGNORECASE,
+        )
+        source = re.sub(r"^brief\s+", "", source, flags=re.IGNORECASE)
+        source = re.split(r"(?<=[.!?:])\s+", source, maxsplit=1)[0]
+        source = source.strip(" .:-")
+        if self._is_weak_title_source(source):
+            return ""
+        return self._build_title(source)
+
     def _build_memory_title(
         self,
         *,
@@ -500,6 +579,26 @@ class AgentService:
         system_summary: str,
         messages: list[MessageDocument],
     ) -> str:
+        if system_summary.strip():
+            summary_title = self._build_summary_title(system_summary)
+            if summary_title and not self._is_weak_title_source(summary_title):
+                return summary_title
+
+        assistant_title = self._build_assistant_title(messages)
+        if assistant_title:
+            return assistant_title
+
+        first_user_message = next(
+            (
+                " ".join(message.content.strip().split())
+                for message in messages
+                if message.sender_type == "user" and message.content.strip()
+            ),
+            "",
+        )
+        if first_user_message and not self._is_weak_title_source(first_user_message):
+            return self._build_title(first_user_message)
+
         latest_user_message = next(
             (
                 " ".join(message.content.strip().split())
@@ -508,10 +607,9 @@ class AgentService:
             ),
             "",
         )
-        if latest_user_message:
+        if latest_user_message and not self._is_weak_title_source(latest_user_message):
             return self._build_title(latest_user_message)
-        if system_summary.strip():
-            return self._build_title(system_summary.strip())
+
         if previous_memory.title.strip():
             return previous_memory.title.strip()
         return "New memory"
