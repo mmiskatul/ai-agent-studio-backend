@@ -13,7 +13,7 @@ from app.agents.state import runtime_agent_registry
 from app.core.config import settings
 from app.models.agent import AgentDocument
 from app.models.base import now_utc
-from app.models.chat import ChatDocument, MessageDocument
+from app.models.chat import ChatDocument, ChatMemoryDocument, MessageDocument
 from app.models.user import UserDocument
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.chat_repository import ChatRepository
@@ -46,41 +46,59 @@ class AgentService:
         self._chats = chats
         self._response_prompt_builder = AgentResponsePromptBuilder()
 
-    def parse_memory_summary(self, summary: str | None) -> MemorySummary:
-        if not summary or not summary.strip():
-            return MemorySummary()
-
-        trimmed_summary = summary.strip()
-        if trimmed_summary.startswith("{"):
-            try:
-                parsed = json.loads(trimmed_summary)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, dict):
-                title = parsed.get("title")
-                description = parsed.get("description")
-                return MemorySummary(
-                    title=title.strip() if isinstance(title, str) else "",
-                    description=description.strip() if isinstance(description, str) else "",
-                )
-
-        return MemorySummary(description=trimmed_summary)
-
-    def _serialize_memory_summary(self, summary: MemorySummary) -> str:
-        return json.dumps(
-            {
-                "title": summary.title.strip(),
-                "description": summary.description.strip(),
-            }
+    def parse_memory_summary(self, value: object) -> MemorySummary:
+        memory = self._parse_chat_memory(value)
+        return MemorySummary(
+            title=memory.title.strip(),
+            description=memory.running_summary.strip(),
         )
 
-    def _memory_summary_text(self, summary: str | None) -> str:
-        parsed_summary = self.parse_memory_summary(summary)
+    def _parse_chat_memory(self, value: object, legacy_summary: str | None = None) -> ChatMemoryDocument:
+        if isinstance(value, ChatMemoryDocument):
+            return value
+
+        if isinstance(value, dict):
+            try:
+                return ChatMemoryDocument.model_validate(value)
+            except ValidationError:
+                pass
+
+        summary_source = legacy_summary
+        if isinstance(value, str):
+            summary_source = value
+
+        if summary_source and summary_source.strip():
+            trimmed_summary = summary_source.strip()
+            if trimmed_summary.startswith("{"):
+                try:
+                    parsed = json.loads(trimmed_summary)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    title = parsed.get("title")
+                    description = parsed.get("description")
+                    return ChatMemoryDocument(
+                        title=title.strip() if isinstance(title, str) else "",
+                        running_summary=description.strip() if isinstance(description, str) else "",
+                    )
+            return ChatMemoryDocument(running_summary=trimmed_summary)
+
+        return ChatMemoryDocument()
+
+    def _memory_context_text(self, memory: ChatMemoryDocument) -> str:
         summary_parts = []
-        if parsed_summary.title:
-            summary_parts.append(f"Title: {parsed_summary.title}")
-        if parsed_summary.description:
-            summary_parts.append(parsed_summary.description)
+        if memory.title:
+            summary_parts.append(f"Title: {memory.title}")
+        if memory.running_summary:
+            summary_parts.append(f"Running Summary: {memory.running_summary}")
+        if memory.last_user_goal:
+            summary_parts.append(f"Last User Goal: {memory.last_user_goal}")
+        if memory.recent_topics:
+            summary_parts.append("Recent Topics: " + ", ".join(memory.recent_topics))
+        if memory.preferences:
+            summary_parts.append("Preferences: " + "; ".join(memory.preferences))
+        if memory.open_loops:
+            summary_parts.append("Open Loops: " + "; ".join(memory.open_loops))
         return "\n".join(summary_parts).strip()
 
     async def list_agents(self, user: UserDocument) -> list[AgentResponse]:
@@ -190,7 +208,7 @@ class AgentService:
         user: UserDocument,
         content: str,
         chat_id: str | None = None,
-    ) -> tuple[AgentDocument, ChatDocument, str, str]:
+    ) -> tuple[AgentDocument, ChatDocument, str, ChatMemoryDocument]:
         agent = await self._get_agent_document(agent_id, user)
         config = self._agent_config(agent)
         if not config.is_active:
@@ -219,15 +237,16 @@ class AgentService:
                 content=parsed_response.response,
             ),
         )
-        memory_summary = self._build_memory_summary(
-            previous_summary=chat.summary or "",
+        memory = self._build_chat_memory(
+            previous_memory=self._parse_chat_memory(chat.memory, chat.summary),
             system_summary=parsed_response.system_summary,
             messages=[*messages, assistant_message],
         )
-        await self._chats.update_chat_summary(chat.id or "", memory_summary)
-        chat.summary = memory_summary
-        await self._apply_summary_title(chat, memory_summary)
-        return agent, chat, parsed_response.response, memory_summary
+        await self._chats.update_chat_memory(chat.id or "", memory)
+        chat.memory = memory
+        chat.summary = None
+        await self._apply_memory_title(chat, memory)
+        return agent, chat, parsed_response.response, memory
 
     async def get_agent_response_history(
         self,
@@ -354,14 +373,15 @@ class AgentService:
                 )
 
         messages = await self._chats.list_messages(chat.id or "")
-        memory_summary = self._build_memory_summary(
-            previous_summary="",
+        memory = self._build_chat_memory(
+            previous_memory=self._parse_chat_memory(chat.memory, chat.summary),
             system_summary=parsed_response.system_summary,
             messages=messages,
         )
-        await self._chats.update_chat_summary(chat.id or "", memory_summary)
-        chat.summary = memory_summary
-        await self._apply_summary_title(chat, memory_summary)
+        await self._chats.update_chat_memory(chat.id or "", memory)
+        chat.memory = memory
+        chat.summary = None
+        await self._apply_memory_title(chat, memory)
         return agent, chat, messages
 
     async def delete_agent_response_message(
@@ -394,14 +414,15 @@ class AgentService:
             await self._chats.delete_message(paired_assistant.id or "")
 
         messages = await self._chats.list_messages(chat.id or "")
-        memory_summary = self._build_memory_summary(
-            previous_summary="",
+        memory = self._build_chat_memory(
+            previous_memory=self._parse_chat_memory(chat.memory, chat.summary),
             system_summary="Deleted a message and rebuilt memory from remaining chat history.",
             messages=messages,
         )
-        await self._chats.update_chat_summary(chat.id or "", memory_summary)
-        chat.summary = memory_summary
-        await self._apply_summary_title(chat, memory_summary)
+        await self._chats.update_chat_memory(chat.id or "", memory)
+        chat.memory = memory
+        chat.summary = None
+        await self._apply_memory_title(chat, memory)
         return agent, chat, messages
 
     async def _get_or_create_memory_chat(
@@ -465,10 +486,10 @@ class AgentService:
             return title
         return f"{title[:77].rstrip()}..."
 
-    def _build_summary_title(
+    def _build_memory_title(
         self,
         *,
-        previous_summary: MemorySummary,
+        previous_memory: ChatMemoryDocument,
         system_summary: str,
         messages: list[MessageDocument],
     ) -> str:
@@ -484,13 +505,12 @@ class AgentService:
             return self._build_title(latest_user_message)
         if system_summary.strip():
             return self._build_title(system_summary.strip())
-        if previous_summary.title.strip():
-            return previous_summary.title.strip()
+        if previous_memory.title.strip():
+            return previous_memory.title.strip()
         return "New memory"
 
-    async def _apply_summary_title(self, chat: ChatDocument, memory_summary: str) -> None:
-        parsed_summary = self.parse_memory_summary(memory_summary)
-        next_title = parsed_summary.title.strip()
+    async def _apply_memory_title(self, chat: ChatDocument, memory: ChatMemoryDocument) -> None:
+        next_title = memory.title.strip()
         if not next_title or not chat.id:
             return
         await self._chats.update_chat_title(chat.id, next_title)
@@ -505,10 +525,11 @@ class AgentService:
         current_message: MessageDocument,
         messages: list[MessageDocument],
     ) -> str:
+        memory = self._parse_chat_memory(chat.memory, chat.summary)
         prompt = self._response_prompt_builder.build(
             agent=agent,
             config=config,
-            memory_summary=self._memory_summary_text(chat.summary),
+            memory=memory,
             current_message=current_message.content,
             messages=messages,
         )
@@ -516,7 +537,7 @@ class AgentService:
             return self._fallback_agent_response(
                 config,
                 current_message.content,
-                self._memory_summary_text(chat.summary),
+                self._memory_context_text(memory),
             )
 
         try:
@@ -531,7 +552,7 @@ class AgentService:
             return self._fallback_agent_response(
                 config,
                 current_message.content,
-                self._memory_summary_text(chat.summary),
+                self._memory_context_text(memory),
             )
 
         client = AsyncOpenAI(api_key=settings.openai_api_key)
@@ -546,7 +567,7 @@ class AgentService:
             return self._fallback_agent_response(
                 config,
                 current_message.content,
-                self._memory_summary_text(chat.summary),
+                self._memory_context_text(memory),
             )
 
         output_text = getattr(response, "output_text", None)
@@ -555,41 +576,57 @@ class AgentService:
         return self._fallback_agent_response(
             config,
             current_message.content,
-            self._memory_summary_text(chat.summary),
+            self._memory_context_text(memory),
         )
 
-    def _build_memory_summary(
+    def _build_chat_memory(
         self,
         *,
-        previous_summary: str,
+        previous_memory: ChatMemoryDocument,
         system_summary: str,
         messages: list[MessageDocument],
-    ) -> str:
-        parsed_previous_summary = self.parse_memory_summary(previous_summary)
-        recent_items = [
-            f"{message.sender_type}: {' '.join(message.content.split())}"
-            for message in messages[-8:]
-            if message.content.strip()
+    ) -> ChatMemoryDocument:
+        recent_user_messages = [
+            " ".join(message.content.strip().split())
+            for message in messages
+            if message.sender_type == "user" and message.content.strip()
         ]
-        summary_parts: list[str] = []
-        if parsed_previous_summary.description.strip():
-            summary_parts.append(parsed_previous_summary.description.strip())
-        if system_summary.strip():
-            summary_parts.append("Latest internal summary: " + system_summary.strip())
-        if recent_items:
-            summary_parts.append("Recent context: " + " | ".join(recent_items))
-        description = "\n".join(summary_parts).strip()
-        if len(description) > 2500:
-            description = description[-2500:].lstrip()
-        summary = MemorySummary(
-            title=self._build_summary_title(
-                previous_summary=parsed_previous_summary,
+        latest_user_goal = recent_user_messages[-1] if recent_user_messages else previous_memory.last_user_goal
+        running_summary = system_summary.strip() or previous_memory.running_summary.strip()
+        if len(running_summary) > 1200:
+            running_summary = running_summary[:1200].rstrip()
+
+        recent_topics = self._collect_recent_topics(recent_user_messages, previous_memory.recent_topics)
+        preferences = self._merge_memory_items(
+            previous_memory.preferences,
+            self._extract_preferences(recent_user_messages),
+            limit=6,
+        )
+        open_loops = self._merge_memory_items(
+            previous_memory.open_loops,
+            self._extract_open_loops(messages),
+            limit=6,
+        )
+        facts = self._merge_memory_items(
+            previous_memory.facts,
+            [system_summary.strip()] if system_summary.strip() else [],
+            limit=6,
+        )
+
+        return ChatMemoryDocument(
+            title=self._build_memory_title(
+                previous_memory=previous_memory,
                 system_summary=system_summary,
                 messages=messages,
             ),
-            description=description,
+            running_summary=running_summary,
+            facts=facts,
+            preferences=preferences,
+            open_loops=open_loops,
+            recent_topics=recent_topics,
+            last_user_goal=latest_user_goal,
+            last_updated_at=now_utc(),
         )
-        return self._serialize_memory_summary(summary)
 
     def _fallback_agent_response(
         self,
@@ -644,6 +681,31 @@ class AgentService:
                 "Send me the target audience, purpose, tone, and any important details, and I will write the final version."
             )
 
+        if any(term in lowered_message for term in ("what is", "what's", "why", "explain", "meaning")):
+            return (
+                f"Direct answer: {cleaned_message}.\n\n"
+                "Send the exact context, and I will turn this into a specific business-ready explanation."
+            )
+
+        if len(cleaned_message) <= 120 and any(
+            term in lowered_message for term in ("sell", "sales", "lead", "customer", "buyer", "price", "offer")
+        ):
+            return (
+                "Here is the direct way to approach this:\n\n"
+                "1. Identify the buyer and the stage of the conversation.\n"
+                "2. Clarify the offer, price point, or objection.\n"
+                "3. Give one clear next action.\n\n"
+                "If you send the exact buyer message or sales situation, I will turn this into a specific reply or plan."
+            )
+
+        if len(cleaned_message) <= 120 and any(
+            term in lowered_message for term in ("problem", "issue", "error", "bug", "not working", "fix")
+        ):
+            return (
+                "Send the exact issue, what you expected, and what happened instead.\n\n"
+                "I will give you the likely cause and the next fix steps."
+            )
+
         if any(term in lowered_message for term in ("plan", "strategy", "steps", "how", "improve")):
             if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
                 return (
@@ -660,22 +722,83 @@ class AgentService:
                 "Share the goal, current situation, and constraint, and I will give you a specific plan."
             )
 
+        if any(term in lowered_message for term in ("can you help", "help me", "need help")):
+            if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
+                return (
+                    "Yes. I can help with the sales side directly.\n\n"
+                    "Best next move:\n"
+                    "- if you have a buyer message, paste it and I will draft the reply\n"
+                    "- if you have an offer problem, describe it and I will improve the positioning\n"
+                    "- if you have a lead, share the details and I will help qualify it"
+                )
+            return (
+                "Yes. Send the exact task, example, or message you want worked on, and I will respond with the actual output."
+            )
+
         if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
             return (
-                "I can help with sales messaging, lead qualification, offer positioning, objection handling, and follow-up.\n\n"
-                "Send me the product, target customer, and the exact sales result you want, and I will give you a specific answer."
+                "I can help with the actual sales work: buyer replies, offer positioning, lead qualification, objection handling, and follow-up.\n\n"
+                "Send the specific sales situation and I will answer it directly."
             )
 
         if any(term in agent_text for term in ("support", "service", "customer")):
             return (
-                "I can help troubleshoot the issue and draft the right customer-facing response.\n\n"
-                "Send the exact problem, affected product or account, and any error text, and I will give you the next steps."
+                "Send the exact problem, affected product or account, and any error text.\n\n"
+                "I will respond with the diagnosis, next steps, and the customer-facing reply if needed."
             )
 
         return (
-            f"I can help with {context}.\n\n"
-            "Tell me the exact result you want, and I will respond with a specific answer instead of a general description."
+            f"Send the exact result you want for this request.\n\n"
+            f"I will respond directly based on {context}, with a specific answer instead of a general description."
         )
+
+    def _collect_recent_topics(
+        self,
+        recent_user_messages: list[str],
+        previous_topics: list[str],
+    ) -> list[str]:
+        collected: list[str] = []
+        for message in [*previous_topics, *recent_user_messages[-5:]]:
+            topic = self._build_title(message).strip()
+            if topic and topic.lower() not in {item.lower() for item in collected}:
+                collected.append(topic)
+        return collected[-5:]
+
+    def _extract_preferences(self, recent_user_messages: list[str]) -> list[str]:
+        preferences: list[str] = []
+        markers = ("prefer", "please", "do not", "don't", "use ", "avoid ")
+        for message in recent_user_messages[-6:]:
+            lowered_message = message.lower()
+            if any(marker in lowered_message for marker in markers):
+                preferences.append(message)
+        return preferences[-4:]
+
+    def _extract_open_loops(self, messages: list[MessageDocument]) -> list[str]:
+        open_loops: list[str] = []
+        for message in messages[-6:]:
+            if message.sender_type == "user" and "?" in message.content:
+                open_loops.append(" ".join(message.content.strip().split()))
+        return open_loops[-4:]
+
+    def _merge_memory_items(
+        self,
+        existing: list[str],
+        new_items: list[str],
+        *,
+        limit: int,
+    ) -> list[str]:
+        merged: list[str] = []
+        seen: set[str] = set()
+        for item in [*existing, *new_items]:
+            normalized = " ".join(item.strip().split())
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(normalized)
+        return merged[-limit:]
 
     async def _get_agent_document(self, agent_id: str, user: UserDocument) -> AgentDocument:
         agent = await self._agents.get_owned(agent_id, user.id or "")
@@ -684,7 +807,7 @@ class AgentService:
         return agent
 
     async def create_agent(self, payload: AgentCreate, user: UserDocument) -> AgentResponse:
-        data = self._normalize_agent_config(payload.model_dump())
+        data = self._normalize_agent_config(payload.model_dump(by_alias=False))
         agent = AgentDocument(user_id=user.id or "", **data)
         return self._agent_response(await self._agents.create(agent))
 
@@ -870,10 +993,14 @@ class AgentService:
             "- Define the agent's role, goal, scope, and boundaries.\n"
             "- Explain the ideal user, supported tasks, and unsupported tasks.\n"
             "- Tell the agent to answer the user's exact request with specific, non-generic guidance.\n"
+            "- Tell the agent to avoid generic capability statements such as 'I can help with...' when the request is already actionable.\n"
+            "- Tell the agent to produce the actual deliverable first: draft, answer, plan, comparison, recommendation, checklist, or script.\n"
+            "- Tell the agent to write outputs that could be shown directly to a client, buyer, or teammate when appropriate.\n"
             "- Require the agent to choose the best representation for each question type: direct answer, plan, checklist, table, script, code, analysis, comparison, or troubleshooting flow.\n"
             "- Require the agent to start with the conclusion or best recommendation before details.\n"
             "- Require practical outputs such as steps, examples, scripts, tables, checklists, or templates when useful.\n"
             "- Require the agent to use details from the user's message instead of placeholders like 'your product'.\n"
+            "- Tell the agent to reuse the user's nouns, constraints, audience, and goal so the answer feels specific.\n"
             "- Explain how to handle missing context: state assumptions, give useful guidance, then ask one question if needed.\n"
             "- Require different answers across turns by using the latest message and conversation history.\n"
             "- Include formatting rules for readable Markdown answers.\n"
@@ -929,10 +1056,14 @@ class AgentService:
             "- Define the role, goal, scope, and boundaries.\n"
             "- Explain the ideal user, supported tasks, and unsupported tasks.\n"
             "- Require the agent to answer the user's exact request with specific, actionable guidance.\n"
+            "- Require the agent to avoid generic capability statements when the user's request is already actionable.\n"
+            "- Require the agent to produce the actual deliverable first: draft, answer, plan, comparison, recommendation, checklist, or script.\n"
+            "- Require the agent to write outputs that could be shown directly to a client, buyer, or teammate when appropriate.\n"
             "- Require the agent to choose the best representation for each question type: direct answer, plan, checklist, table, script, code, analysis, comparison, or troubleshooting flow.\n"
             "- Require the agent to start with the conclusion or best recommendation before details.\n"
             "- Require concrete examples, scripts, checklists, tables, or next steps when useful.\n"
             "- Require the agent to reuse user-provided details and avoid generic placeholders.\n"
+            "- Require the agent to reuse the user's nouns, constraints, audience, and goal so the answer feels specific.\n"
             "- Require the agent to state assumptions when details are missing and ask at most one clarifying question.\n"
             "- Require the agent to produce a different, context-aware answer each turn by using conversation history.\n"
             "- Include formatting rules for readable Markdown answers.\n"

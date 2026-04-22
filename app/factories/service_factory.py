@@ -2,6 +2,7 @@ from app.db.unit_of_work import UnitOfWork
 from app.services.agent_service import AgentService
 from app.services.auth_service import AuthService
 from app.services.chat_service import ChatService
+from app.services.multi_chat_service import MultiChatService
 from app.services.overview_service import OverviewService
 
 
@@ -22,6 +23,15 @@ class ServiceFactory:
     @property
     def chat_service(self) -> ChatService:
         return ChatService(self._uow.chats, self._uow.agents)
+
+    @property
+    def multi_chat_service(self) -> MultiChatService:
+        return MultiChatService(
+            agents=self._uow.agents,
+            chats=self._uow.chats,
+            messages=self._uow.messages,
+            memories=self._uow.memory,
+        )
 
     @property
     def overview_service(self) -> OverviewService:

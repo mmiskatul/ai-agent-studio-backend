@@ -2,8 +2,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from app.agents.config import AgentConfig
 from app.core.config import settings
 from app.tools.base import AgentTool
@@ -30,10 +28,6 @@ class AgentRuntime:
             if output:
                 return output
 
-        output = await self._run_crewai_agent(message, history)
-        if output:
-            return output
-
         output = await self._run_langchain_agent(message, history)
         if output:
             return output
@@ -42,43 +36,6 @@ class AgentRuntime:
             return self.fallback(self.config, message)
 
         return self._default_fallback(message)
-
-    async def _run_crewai_agent(self, message: str, history: list[str]) -> str | None:
-        try:
-            from crewai import Agent, Crew, Process, Task
-        except ImportError:
-            return None
-
-        try:
-            crew_agent = Agent(
-                role=self.config.role,
-                goal=self.config.description,
-                backstory=self._crewai_backstory(),
-                llm=self._crewai_llm(),
-                tools=self._crewai_tools(),
-                verbose=False,
-                allow_delegation=False,
-                max_iter=8,
-            )
-            task = Task(
-                description=self._crewai_task_description(message, history),
-                expected_output="A direct, useful final answer for the user.",
-                agent=crew_agent,
-            )
-            crew = Crew(
-                agents=[crew_agent],
-                tasks=[task],
-                process=Process.sequential,
-                verbose=False,
-            )
-            if hasattr(crew, "akickoff"):
-                result = await crew.akickoff(inputs={})
-            else:
-                result = await crew.kickoff_async(inputs={})
-        except Exception:
-            return None
-
-        return self._extract_crewai_output(result)
 
     async def _run_langchain_agent(self, message: str, history: list[str]) -> str | None:
         try:
@@ -115,105 +72,6 @@ class AgentRuntime:
             if provider == "openai" and model:
                 return model
         return self.config.model
-
-    def _crewai_model_name(self) -> str:
-        model = self._openai_model_name()
-        if model.startswith("openai/"):
-            return model
-        return f"openai/{model}"
-
-    def _crewai_llm(self) -> Any:
-        from crewai import LLM
-
-        return LLM(
-            model=self._crewai_model_name(),
-            temperature=self.config.temperature,
-            api="responses",
-        )
-
-    def _crewai_backstory(self) -> str:
-        return (
-            f"You are {self.config.name}. "
-            f"{self.config.system_prompt.strip()}"
-        )
-
-    def _crewai_task_description(self, message: str, history: list[str]) -> str:
-        history_block = "\n".join(history[-12:]).strip()
-        if history_block:
-            history_block = f"Conversation history:\n{history_block}\n\n"
-        return (
-            f"{history_block}"
-            f"User request:\n{message.strip()}\n\n"
-            "Respond in the configured agent role. Use tools when they help. "
-            "Give the final answer only."
-        )
-
-    def _crewai_tools(self) -> list[Any]:
-        try:
-            from crewai.tools import BaseTool
-        except ImportError:
-            return []
-
-        class CrewToolInput(BaseModel):
-            query: str = Field(..., description="The user request or tool input.")
-
-        crew_tools: list[Any] = []
-        for configured_tool in self.tools:
-            crew_tools.append(
-                self._build_crewai_tool(
-                    base_tool=BaseTool,
-                    args_schema=CrewToolInput,
-                    configured_tool=configured_tool,
-                ),
-            )
-
-        return crew_tools
-
-    def _build_crewai_tool(
-        self,
-        *,
-        base_tool: type[Any],
-        args_schema: type[BaseModel],
-        configured_tool: AgentTool,
-    ) -> Any:
-        def run_tool(query: str) -> str:
-            payload = {
-                "query": query,
-                "text": query,
-                "expression": query,
-                "product": query,
-                "channel": query,
-            }
-            result = configured_tool.handler(payload)
-            if isinstance(result, str):
-                return result
-            return "Async tool handlers are not supported in sync CrewAI tools yet."
-
-        tool_class = type(
-            f"CrewWrappedTool_{configured_tool.name.replace(' ', '_')}",
-            (base_tool,),
-            {
-                "name": configured_tool.name,
-                "description": configured_tool.description,
-                "args_schema": args_schema,
-                "_run": staticmethod(run_tool),
-            },
-        )
-        return tool_class()
-
-    def _extract_crewai_output(self, result: Any) -> str | None:
-        raw = getattr(result, "raw", None)
-        if isinstance(raw, str) and raw.strip():
-            return raw.strip()
-
-        output = getattr(result, "output", None)
-        if isinstance(output, str) and output.strip():
-            return output.strip()
-
-        if isinstance(result, str) and result.strip():
-            return result.strip()
-
-        return None
 
     def _langchain_system_prompt(self) -> str:
         return (

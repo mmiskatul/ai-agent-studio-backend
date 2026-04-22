@@ -1,9 +1,9 @@
 # AgentHub Backend
 
-FastAPI backend for a dynamic multi-agent platform. Agents are configuration-driven,
-stored in MongoDB, loaded through an in-memory registry, and executed through a
-LangChain `create_agent(...)` factory with a deterministic fallback when no LLM
-provider key is configured.
+FastAPI backend for a dynamic multi-agent platform. Agents are stored in MongoDB,
+loaded per request, routed through a LangGraph workflow, and executed with a
+LangChain/OpenAI-compatible LLM layer plus deterministic fallback behavior when
+no provider key is configured.
 
 ## Stack
 
@@ -11,7 +11,7 @@ provider key is configured.
 - MongoDB with Motor
 - Pydantic v2
 - LangChain `create_agent(...)`
-- LangGraph-ready registry/router structure
+- LangGraph state graph orchestration
 - Repository and service layers
 
 ## Architecture
@@ -20,6 +20,7 @@ provider key is configured.
 app/
   main.py
   api/
+    v1/endpoints/chat.py
   agents/
     config.py
     factory.py
@@ -27,6 +28,17 @@ app/
     registry.py
     routing/
     configs/
+  graph/
+    state.py
+    builder.py
+    nodes/
+      load_context.py
+      load_agents.py
+      route_request.py
+      run_selected_agent.py
+      save_memory.py
+      save_messages.py
+      format_response.py
   core/
   db/
   models/
@@ -36,17 +48,17 @@ app/
   tools/
 ```
 
-The runtime flow is:
+The production chat flow is:
 
 ```text
-Mongo agent document
-  -> AgentConfig
-  -> ToolRegistry resolves tool names
-  -> create_agent(config, tools)
-  -> AgentRegistry
-  -> AgentRouter / supervisor selection
-  -> AgentRuntime.run(...)
-  -> LangChain create_agent(...) or fallback response
+POST /api/chat/send
+  -> load_context
+  -> load_agents
+  -> route_request
+  -> run_selected_agent
+  -> save_memory
+  -> save_messages
+  -> format_response
 ```
 
 No agent-specific workflow logic is required to add a new agent. Add a MongoDB
@@ -99,20 +111,21 @@ Collection: `agents`
 
 ```json
 {
-  "_id": {"$oid": "661000000000000000000001"},
+  "_id": "sales_bot",
   "user_id": "660fffffffffffffffffffff",
-  "name": "Sales Support Agent",
-  "role": "Sales Support Agent",
-  "purpose": "Qualifies leads and helps convert buyer messages into orders.",
-  "description": "Qualifies leads and helps convert buyer messages into orders.",
-  "system_prompt": "You are a sales support agent. Give practical, specific advice.",
-  "tools": ["sales_playbook", "summarizer"],
-  "llm_engine": "gpt-4.1-mini",
+  "name": "Sales Bot",
+  "role": "Sales Assistant",
+  "purpose": "Handles sales inquiries, pricing, and lead qualification.",
+  "description": "Handles sales inquiries, pricing, and lead qualification.",
+  "system_prompt": "You are a highly professional sales assistant. Qualify needs, explain options clearly, and never invent prices.",
+  "tools": ["pricing_lookup", "faq_search"],
   "model": "gpt-4.1-mini",
-  "temperature": 0.7,
+  "llm_engine": "gpt-4.1-mini",
+  "temperature": 0.4,
+  "routing_keywords": ["price", "pricing", "quote", "buy", "purchase", "demo"],
+  "priority": 1,
   "status": "active",
   "is_active": true,
-  "welcome_message": "Hi, I can help you improve sales conversations.",
   "created_at": {"$date": "2026-04-22T00:00:00Z"},
   "updated_at": {"$date": "2026-04-22T00:00:00Z"}
 }
@@ -187,13 +200,42 @@ curl -X POST http://localhost:8000/api/v1/agents/route \
   -d "{\"task\":\"Analyze revenue by channel\"}"
 ```
 
-Chat with a selected agent:
+Route and chat through LangGraph:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/agents/<AGENT_ID>/chat \
+curl -X POST http://localhost:8000/api/chat/send \
   -H "Authorization: Bearer <ACCESS_TOKEN>" \
   -H "Content-Type: application/json" \
-  -d "{\"content\":\"Analyze revenue trend for the last 30 days\"}"
+  -d "{\"session_id\":\"session_123\",\"chat_id\":\"chat_123\",\"message\":\"Can I get pricing for 25 seats?\"}"
+```
+
+Example response:
+
+```json
+{
+  "session_id": "session_123",
+  "chat_id": "chat_123",
+  "agent": {
+    "id": "sales_bot",
+    "name": "Sales Bot",
+    "role": "Sales Assistant"
+  },
+  "system_summary": "Sales Bot handled the request using session context and available memory.",
+  "response": "Here are the pricing details I can help clarify...",
+  "routing_reason": "Matched 1 routing keyword(s) for Sales Bot.",
+  "memory_updated": true,
+  "metadata": {
+    "model": "gpt-4.1-mini",
+    "timestamp": "2026-04-22T00:00:00+00:00"
+  }
+}
+```
+
+Fetch session history:
+
+```bash
+curl http://localhost:8000/api/chat/history/session_123 \
+  -H "Authorization: Bearer <ACCESS_TOKEN>"
 ```
 
 Seed default agents:

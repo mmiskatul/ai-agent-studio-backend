@@ -1,7 +1,13 @@
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.agent import AgentDocument
-from app.models.chat import ChatDocument, MessageDocument
+from app.models.chat import ChatDocument, ChatMemoryDocument, MessageDocument
+
+
+def _legacy_memory(summary: str | None) -> ChatMemoryDocument | None:
+    if not summary or not summary.strip():
+        return None
+    return ChatMemoryDocument(running_summary=summary.strip())
 
 
 async def migrate_legacy_chat_storage(db: AsyncIOMotorDatabase) -> None:
@@ -29,6 +35,7 @@ async def migrate_legacy_chat_storage(db: AsyncIOMotorDatabase) -> None:
                 agent_name=agent.name,
                 title=embedded_chat.title,
                 summary=embedded_chat.summary,
+                memory=_legacy_memory(embedded_chat.summary),
                 messages=embedded_chat.messages,
                 created_at=embedded_chat.created_at,
                 updated_at=embedded_chat.updated_at,
@@ -73,6 +80,7 @@ async def migrate_legacy_chat_storage(db: AsyncIOMotorDatabase) -> None:
             agent_name=agent.name if agent is not None else raw_chat.get("agent_name"),
             title=raw_chat.get("title"),
             summary=raw_chat.get("summary"),
+            memory=_legacy_memory(raw_chat.get("summary")),
             messages=message_docs,
             created_at=raw_chat["created_at"],
             updated_at=raw_chat.get("updated_at", raw_chat["created_at"]),

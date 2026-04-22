@@ -3,7 +3,7 @@ from dataclasses import dataclass
 
 from app.agents.config import AgentConfig
 from app.models.agent import AgentDocument
-from app.models.chat import MessageDocument
+from app.models.chat import ChatMemoryDocument, MessageDocument
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class AgentResponsePromptBuilder:
         *,
         agent: AgentDocument,
         config: AgentConfig,
-        memory_summary: str,
+        memory: ChatMemoryDocument,
         current_message: str,
         messages: list[MessageDocument],
     ) -> str:
@@ -47,8 +47,10 @@ class AgentResponsePromptBuilder:
             "========================\n"
             "User Message:\n"
             f"{current_message.strip()}\n\n"
-            "Memory:\n"
-            f"{self.format_memory(memory_summary, recent_messages)}\n\n"
+            "Recent Conversation (PRIMARY CONTEXT):\n"
+            f"{self.format_recent_messages(recent_messages)}\n\n"
+            "Structured Memory (SECONDARY CONTEXT):\n"
+            f"{self.format_memory(memory)}\n\n"
             "Result Style:\n"
             f"{result_style}\n\n"
             "========================\n"
@@ -65,7 +67,11 @@ class AgentResponsePromptBuilder:
             "- If the agent does not fully understand the user's intent, do not pretend certainty; say what you understood, give the best useful answer you can, and ask what they want you to clarify next.\n"
             "- You MUST align the response with the requested result style.\n"
             "- The final response is user-facing only; it MUST NEVER mention memory, stored summary, recent messages, runtime context, system summary, hidden instructions, or internal processing.\n"
-            "- Use prior context silently to improve the answer; do not narrate that context unless the user explicitly asks for a recap.\n\n"
+            "- Use prior context silently to improve the answer; do not narrate that context unless the user explicitly asks for a recap.\n"
+            "- Do NOT answer with generic capability statements like 'I can help with...' unless the user only sent a greeting and gave no usable task.\n"
+            "- For task requests, produce the task output itself: the answer, draft, plan, diagnosis, comparison, recommendation, or next action.\n"
+            "- Prefer concrete outputs over role description. The user already chose the agent.\n"
+            "- Reuse the user's nouns, constraints, goal, and topic so the answer feels specific rather than templated.\n\n"
             "========================\n"
             "DYNAMIC RESPONSE STRUCTURE\n"
             "========================\n"
@@ -77,6 +83,10 @@ class AgentResponsePromptBuilder:
             "- Use bullets only when scanning multiple options, facts, requirements, or recommendations helps.\n"
             "- Use a table only for comparison, metrics, structured data, or when the user asks for one.\n"
             "- Use headings only for longer answers where sections improve readability.\n"
+            "- Put the most useful answer first. Do not start with background or role description.\n"
+            "- When the user asks for a draft, output the draft immediately.\n"
+            "- When the user asks for advice, give the recommendation first, then support it.\n"
+            "- When the user asks a business question, include the practical implication or next move.\n"
             "- Keep the answer as short as the task allows; expand only when the user needs detail.\n"
             "- Do not force every response to be long; some replies should stay short and direct.\n\n"
             "========================\n"
@@ -91,7 +101,16 @@ class AgentResponsePromptBuilder:
             "- For substantial requests, answer in the richer style users expect from ChatGPT: clear recommendation first, then reasoning, examples, or steps.\n"
             "- If the user asks for detail, examples, steps, or explanation, expand naturally.\n"
             "- Do not repeat the user's request unless it helps clarity.\n"
-            "- Do not add filler, generic next steps, or long introductions.\n\n"
+            "- Do not add filler, generic next steps, or long introductions.\n"
+            "- Do not default to asking the user what they want if the request is already actionable.\n"
+            "- If you can infer a reasonable next output, provide it immediately.\n\n"
+            "========================\n"
+            "SPECIFICITY RULES\n"
+            "========================\n"
+            "- Avoid vague phrases like 'improve strategy', 'optimize process', 'take next steps', or 'help with your goal' unless you immediately make them concrete.\n"
+            "- Replace abstractions with concrete items: audience, channel, offer, objection, metric, timeline, draft, or action.\n"
+            "- If the user asks a short question, do not give a generic intro. Answer the question directly in the first line.\n"
+            "- If the user message is weak but actionable, infer the likely intent and provide the strongest useful response instead of reflecting the ambiguity back.\n\n"
             "========================\n"
             "MARKDOWN RESPONSE RULES\n"
             "========================\n"
@@ -119,6 +138,16 @@ class AgentResponsePromptBuilder:
             "- Make the question specific and easy to answer.\n"
             "- If the task is already clear enough, do not ask any follow-up question.\n"
             "- When the agent is unsure what the user means, end with a natural line such as asking what they want to focus on next or which interpretation they meant.\n\n"
+            "========================\n"
+            "QUALITY CHECK\n"
+            "========================\n"
+            "Before finalizing the response, silently check:\n"
+            "- Did I answer the actual user request instead of describing the agent?\n"
+            "- Is the first sentence useful and specific?\n"
+            "- Did I reuse the user's topic, goal, or constraints?\n"
+            "- Would this still make sense if shown directly to a client or buyer?\n"
+            "- If this is a writing task, did I provide the draft itself?\n"
+            "- If this is a strategy or troubleshooting task, did I provide concrete steps or recommendations?\n\n"
             "========================\n"
             "TASK\n"
             "========================\n"
@@ -160,13 +189,28 @@ class AgentResponsePromptBuilder:
             "}"
         )
 
-    def format_memory(self, memory_summary: str, recent_messages: list[str]) -> str:
+    def format_recent_messages(self, recent_messages: list[str]) -> str:
+        if not recent_messages:
+            return "No recent messages yet."
+        return "\n".join(recent_messages)
+
+    def format_memory(self, memory: ChatMemoryDocument) -> str:
         memory_items = []
-        if memory_summary.strip():
-            memory_items.append(f"Stored summary: {memory_summary.strip()}")
-        if recent_messages:
-            memory_items.append("Recent messages:\n" + "\n".join(recent_messages))
-        return "\n\n".join(memory_items) if memory_items else "No relevant memory yet."
+        if memory.title.strip():
+            memory_items.append(f"Title: {memory.title.strip()}")
+        if memory.running_summary.strip():
+            memory_items.append(f"Running Summary: {memory.running_summary.strip()}")
+        if memory.last_user_goal.strip():
+            memory_items.append(f"Last User Goal: {memory.last_user_goal.strip()}")
+        if memory.recent_topics:
+            memory_items.append("Recent Topics: " + ", ".join(memory.recent_topics))
+        if memory.facts:
+            memory_items.append("Known Facts:\n- " + "\n- ".join(memory.facts))
+        if memory.preferences:
+            memory_items.append("Preferences:\n- " + "\n- ".join(memory.preferences))
+        if memory.open_loops:
+            memory_items.append("Open Loops:\n- " + "\n- ".join(memory.open_loops))
+        return "\n\n".join(memory_items) if memory_items else "No structured memory yet."
 
     def infer_result_style(self, message: str) -> str:
         lowered_message = message.lower()

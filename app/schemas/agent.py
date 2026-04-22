@@ -1,12 +1,15 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AgentBase(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str | None = Field(default=None, alias="_id")
     name: str = Field(min_length=1, max_length=120)
     role: str = Field(min_length=1, max_length=160)
-    purpose: str = Field(min_length=1, max_length=1500)
+    purpose: str = Field(default="", max_length=1500)
     description: str | None = None
     template_type: str | None = None
     category_tag: str | None = None
@@ -17,6 +20,8 @@ class AgentBase(BaseModel):
     temperature: float = Field(default=0.7, ge=0, le=2)
     status: str = "active"
     tools: list[str] = Field(default_factory=list)
+    routing_keywords: list[str] = Field(default_factory=list)
+    priority: int = Field(default=100, ge=0)
     is_active: bool = True
 
 
@@ -184,6 +189,8 @@ class AgentUpdate(BaseModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     status: str | None = None
     tools: list[str] | None = None
+    routing_keywords: list[str] | None = None
+    priority: int | None = Field(default=None, ge=0)
     is_active: bool | None = None
 
 

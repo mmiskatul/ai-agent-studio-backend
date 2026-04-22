@@ -7,7 +7,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.agent import AgentDocument
 from app.models.base import now_utc
-from app.models.chat import ChatDocument, MessageDocument
+from app.models.chat import ChatDocument, ChatMemoryDocument, MessageDocument
 
 
 class ChatRepository:
@@ -17,13 +17,12 @@ class ChatRepository:
 
     async def create(self, chat: ChatDocument) -> ChatDocument:
         agent = await self._get_agent(chat.agent_id, chat.user_id)
-        if agent is None:
-            raise ValueError("Agent not found")
 
         created_chat = chat.model_copy(
             update={
                 "id": chat.id or self._create_id("chat"),
-                "agent_name": chat.agent_name or agent.name,
+                "current_agent_id": chat.current_agent_id or chat.agent_id,
+                "agent_name": chat.agent_name or (agent.name if agent else None),
                 "messages": list(chat.messages),
                 "created_at": chat.created_at,
                 "updated_at": chat.updated_at,
@@ -49,6 +48,23 @@ class ChatRepository:
             {"_id": chat_id, "user_id": user_id, "agent_id": agent_id},
         )
         return ChatDocument.from_mongo(data)
+
+    async def get_by_id_for_user(self, user_id: str, chat_id: str) -> ChatDocument | None:
+        data = await self.collection.find_one({"_id": chat_id, "user_id": user_id})
+        return ChatDocument.from_mongo(data)
+
+    async def get_latest_for_session(self, user_id: str, session_id: str) -> ChatDocument | None:
+        data = await self.collection.find_one(
+            {"user_id": user_id, "session_id": session_id},
+            sort=[("updated_at", -1), ("created_at", -1)],
+        )
+        return ChatDocument.from_mongo(data)
+
+    async def list_by_session(self, user_id: str, session_id: str) -> list[ChatDocument]:
+        cursor = self.collection.find({"user_id": user_id, "session_id": session_id}).sort(
+            [("updated_at", -1), ("created_at", -1)]
+        )
+        return [chat async for chat in self._iterate_chats(cursor)]
 
     async def list_by_agent(self, user_id: str, agent_id: str) -> list[ChatDocument]:
         cursor = self.collection.find({"user_id": user_id, "agent_id": agent_id}).sort(
@@ -77,6 +93,24 @@ class ChatRepository:
         await self._save_chat(chat)
         return chat
 
+    async def update_chat_agent(
+        self,
+        chat_id: str,
+        *,
+        agent_id: str,
+        agent_name: str,
+    ) -> ChatDocument | None:
+        located = await self._locate_chat(chat_id)
+        if located is None:
+            return None
+        chat = located
+        chat.agent_id = agent_id
+        chat.current_agent_id = agent_id
+        chat.agent_name = agent_name
+        chat.updated_at = now_utc()
+        await self._save_chat(chat)
+        return chat
+
     async def update_chat_summary(self, chat_id: str, summary: str) -> ChatDocument | None:
         located = await self._locate_chat(chat_id)
         if located is None:
@@ -85,6 +119,30 @@ class ChatRepository:
         chat.summary = summary
         chat.updated_at = now_utc()
         await self._save_chat(chat)
+        return chat
+
+    async def update_chat_memory(
+        self,
+        chat_id: str,
+        memory: ChatMemoryDocument,
+    ) -> ChatDocument | None:
+        located = await self._locate_chat(chat_id)
+        if located is None:
+            return None
+        chat = located
+        chat.memory = memory
+        chat.updated_at = now_utc()
+        await self.collection.update_one(
+            {"_id": chat_id},
+            {
+                "$set": {
+                    "memory": memory.model_dump(exclude_none=True),
+                    "updated_at": chat.updated_at,
+                },
+                "$unset": {"summary": ""},
+            },
+        )
+        chat.summary = None
         return chat
 
     async def count_user_messages_by_chat_ids(
@@ -202,9 +260,8 @@ class ChatRepository:
         await self.collection.delete_many({"agent_id": agent_id})
 
     async def _get_agent(self, agent_id: str, user_id: str) -> AgentDocument | None:
-        if not ObjectId.is_valid(agent_id):
-            return None
-        data = await self.agents_collection.find_one({"_id": ObjectId(agent_id), "user_id": user_id})
+        agent_key = ObjectId(agent_id) if ObjectId.is_valid(agent_id) else agent_id
+        data = await self.agents_collection.find_one({"_id": agent_key, "user_id": user_id})
         return AgentDocument.from_mongo(data)
 
     async def _locate_chat(self, chat_id: str) -> ChatDocument | None:

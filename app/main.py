@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.logging import configure_logging
 from app.db.indexes import create_indexes
 from app.db.migrations import migrate_legacy_chat_storage
 from app.db.mongodb import mongo_database
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
+    configure_logging()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
     app.add_middleware(
@@ -32,6 +34,8 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(api_router, prefix=settings.api_v1_prefix)
+    if settings.api_v1_prefix != "/api":
+        app.include_router(api_router, prefix="/api")
     return app
 
 

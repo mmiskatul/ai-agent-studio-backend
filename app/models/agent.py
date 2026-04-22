@@ -5,10 +5,10 @@ from app.models.chat import ChatDocument
 
 
 class AgentDocument(MongoDocument):
-    user_id: str
+    user_id: str = ""
     name: str
     role: str
-    purpose: str
+    purpose: str = ""
     description: str | None = None
     template_type: str | None = None
     category_tag: str | None = None
@@ -19,5 +19,7 @@ class AgentDocument(MongoDocument):
     temperature: float = 0.7
     status: str = "active"
     tools: list[str] = Field(default_factory=list)
+    routing_keywords: list[str] = Field(default_factory=list)
+    priority: int = 100
     is_active: bool = True
     chats: list[ChatDocument] = Field(default_factory=list)

@@ -195,7 +195,9 @@ async def get_agent_response_history(
         agent_id=agent.id or "",
         agent_name=agent.name,
         chat_id=chat.id if chat else None,
-        memory_summary=factory.agent_service.parse_memory_summary(chat.summary if chat else None),
+        memory_summary=factory.agent_service.parse_memory_summary(
+            chat.memory if chat else None
+        ),
         messages=[
             AgentResponseMessage.model_validate(
                 {
@@ -220,7 +222,7 @@ async def list_agent_response_pages(
             id=chat.id or "",
             agent_id=chat.agent_id,
             title=chat.title,
-            memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+            memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
             message_count=message_count,
             created_at=chat.created_at,
             updated_at=chat.updated_at,
@@ -249,7 +251,7 @@ async def create_agent_response_page(
         id=chat.id or "",
         agent_id=chat.agent_id,
         title=chat.title,
-        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
         message_count=0,
         created_at=chat.created_at,
         updated_at=chat.updated_at,
@@ -423,7 +425,7 @@ async def get_latest_agent_response_history(
         agent_id=agent.id or "",
         agent_name=agent.name,
         chat_id=chat.id,
-        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
         messages=[
             AgentResponseMessage.model_validate(
                 {
@@ -468,7 +470,7 @@ async def update_agent_response_message(
         agent_id=agent.id or "",
         agent_name=agent.name,
         chat_id=chat.id,
-        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
         messages=[
             AgentResponseMessage.model_validate(
                 {
@@ -500,7 +502,7 @@ async def delete_agent_response_message(
         agent_id=agent.id or "",
         agent_name=agent.name,
         chat_id=chat.id,
-        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
         messages=[
             AgentResponseMessage.model_validate(
                 {
@@ -524,6 +526,16 @@ async def get_agent(
 
 @router.patch("/{agent_id}", response_model=AgentResponse)
 async def update_agent(
+    agent_id: str,
+    payload: AgentUpdate,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    return await factory.agent_service.update_agent(agent_id, payload, current_user)
+
+
+@router.put("/{agent_id}", response_model=AgentResponse)
+async def replace_agent(
     agent_id: str,
     payload: AgentUpdate,
     current_user: UserDocument = Depends(get_current_user),
