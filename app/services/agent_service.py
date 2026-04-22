@@ -1219,12 +1219,9 @@ class AgentService:
 
         try:
             from openai import AsyncOpenAI
-            from openai import APIError, APIStatusError, RateLimitError
-        except ImportError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="OpenAI SDK is not installed. Run pip install -r requirements.txt.",
-            ) from exc
+        except ImportError:
+            logger.exception("OpenAI SDK is unavailable; using fallback generated text.")
+            return fallback
 
         client = AsyncOpenAI(api_key=settings.openai_api_key)
         try:
@@ -1232,7 +1229,8 @@ class AgentService:
                 model=settings.default_llm_engine,
                 input=input_text,
             )
-        except (RateLimitError, APIStatusError, APIError):
+        except Exception:
+            logger.exception("Text generation failed; using fallback generated text.")
             return fallback
 
         output_text = getattr(response, "output_text", None)
