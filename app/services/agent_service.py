@@ -1,7 +1,9 @@
 import json
 from datetime import timedelta
+from logging import getLogger
 
 from fastapi import HTTPException, status
+from pydantic import ValidationError
 
 from app.agents.config import AgentConfig
 from app.agents.configs import DEFAULT_AGENT_CONFIGS
@@ -34,6 +36,8 @@ from app.services.agent_response_prompt import (
     parse_agent_json_response,
 )
 from app.tools.registry import default_tool_registry
+
+logger = getLogger(__name__)
 
 
 class AgentService:
@@ -82,15 +86,20 @@ class AgentService:
     async def list_agents(self, user: UserDocument) -> list[AgentResponse]:
         user_id = user.id or ""
         agents = await self._agents.list_by_user(user_id)
-        query_counts = await self._count_queries_30d_by_agent(user_id)
-        return [
-            self._agent_response(agent, queries_30d=query_counts.get(agent.id or "", 0))
-            for agent in agents
-        ]
+        query_counts = await self._safe_count_queries_30d_by_agent(user_id)
+        responses: list[AgentResponse] = []
+        for agent in agents:
+            try:
+                responses.append(
+                    self._agent_response(agent, queries_30d=query_counts.get(agent.id or "", 0))
+                )
+            except ValidationError:
+                logger.exception("Skipping invalid agent document during list_agents", extra={"agent_id": agent.id})
+        return responses
 
     async def get_agent(self, agent_id: str, user: UserDocument) -> AgentResponse:
         agent = await self._get_agent_document(agent_id, user)
-        query_counts = await self._count_queries_30d_by_agent(user.id or "", [agent.id or ""])
+        query_counts = await self._safe_count_queries_30d_by_agent(user.id or "", [agent.id or ""])
         return self._agent_response(agent, queries_30d=query_counts.get(agent.id or "", 0))
 
     async def list_agent_configs(self, user: UserDocument) -> list[AgentConfigResponse]:
@@ -588,16 +597,84 @@ class AgentService:
         message: str,
         memory_summary: str,
     ) -> str:
-        context = config.description.strip()
-        memory_line = (
-            f" I will also use what we already discussed: {memory_summary[:220].strip()}"
-            if memory_summary.strip()
-            else ""
-        )
+        _ = memory_summary
+        cleaned_message = " ".join(message.strip().split())
+        lowered_message = cleaned_message.lower()
+        context = config.description.strip() or config.role.strip() or config.name.strip()
+        agent_text = " ".join(
+            [
+                config.name,
+                config.role,
+                config.description,
+            ]
+        ).lower()
+
+        if not cleaned_message:
+            return (
+                f"I can help with {context}.\n\n"
+                "Tell me the exact result you want, and I will respond directly."
+            )
+
+        if any(term in lowered_message for term in ("hi", "hello", "hey", "bro")) and len(cleaned_message) <= 20:
+            if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
+                return (
+                    "Hi. I can help with buyer replies, outreach copy, offers, lead qualification, "
+                    "and follow-up strategy.\n\n"
+                    "Tell me what you want to do next: draft a message, improve a pitch, qualify a lead, or plan follow-up."
+                )
+            return (
+                f"Hi. I can help with {context}.\n\n"
+                "Tell me what you want to do next, and I will answer directly."
+            )
+
+        if any(term in lowered_message for term in ("write", "draft", "reply", "message", "email")):
+            if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
+                return (
+                    "I can write that for you.\n\n"
+                    "Send me these details:\n"
+                    "- product or service\n"
+                    "- target customer\n"
+                    "- channel (email, WhatsApp, LinkedIn, call follow-up)\n"
+                    "- goal of the message\n"
+                    "- tone you want\n\n"
+                    "If you want, paste the buyer's message and I will draft the reply."
+                )
+            return (
+                "I can draft that.\n\n"
+                "Send me the target audience, purpose, tone, and any important details, and I will write the final version."
+            )
+
+        if any(term in lowered_message for term in ("plan", "strategy", "steps", "how", "improve")):
+            if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
+                return (
+                    "Here is a direct sales structure to move forward:\n\n"
+                    "1. Define the buyer and current stage.\n"
+                    "2. Clarify the offer and strongest value point.\n"
+                    "3. Handle the main objection or friction.\n"
+                    "4. Give one clear next action.\n"
+                    "5. Follow up with a short reminder and proof point.\n\n"
+                    "If you share the product, customer type, and goal, I can turn this into a specific sales plan."
+                )
+            return (
+                "I can break that down into direct steps.\n\n"
+                "Share the goal, current situation, and constraint, and I will give you a specific plan."
+            )
+
+        if any(term in agent_text for term in ("sales", "lead", "buyer", "revenue")):
+            return (
+                "I can help with sales messaging, lead qualification, offer positioning, objection handling, and follow-up.\n\n"
+                "Send me the product, target customer, and the exact sales result you want, and I will give you a specific answer."
+            )
+
+        if any(term in agent_text for term in ("support", "service", "customer")):
+            return (
+                "I can help troubleshoot the issue and draft the right customer-facing response.\n\n"
+                "Send the exact problem, affected product or account, and any error text, and I will give you the next steps."
+            )
+
         return (
-            f"I can help with {context}.{memory_line}\n\n"
-            f"You said: {message.strip()}\n\n"
-            "Tell me the specific result you want next, and I will respond in this agent's role."
+            f"I can help with {context}.\n\n"
+            "Tell me the exact result you want, and I will respond with a specific answer instead of a general description."
         )
 
     async def _get_agent_document(self, agent_id: str, user: UserDocument) -> AgentDocument:
@@ -677,6 +754,20 @@ class AgentService:
             if agent_id:
                 query_counts_by_agent[agent_id] = query_counts_by_agent.get(agent_id, 0) + count
         return query_counts_by_agent
+
+    async def _safe_count_queries_30d_by_agent(
+        self,
+        user_id: str,
+        agent_ids: list[str] | None = None,
+    ) -> dict[str, int]:
+        try:
+            return await self._count_queries_30d_by_agent(user_id, agent_ids)
+        except Exception:
+            logger.exception(
+                "Falling back to zero query counts due to count failure",
+                extra={"user_id": user_id, "agent_ids": agent_ids},
+            )
+            return {}
 
     def _agent_response(self, agent: AgentDocument, queries_30d: int = 0) -> AgentResponse:
         return AgentResponse.model_validate(
@@ -978,10 +1069,15 @@ class AgentService:
             "- Start with the direct answer or recommendation.\n"
             "- Choose the best representation for the request: direct answer, numbered plan, checklist, table, script, code, analysis, comparison, or troubleshooting flow.\n"
             "- Give specific, practical guidance with enough detail to act on immediately.\n"
+            "- Keep the output brief but descriptive whenever possible.\n"
+            "- For complex or high-value requests, give a fuller ChatGPT-style answer with reasoning, examples, and useful detail.\n"
+            "- For simple requests, keep the answer short and direct.\n"
             "- Include examples, scripts, checklists, calculations, tables, or templates when useful.\n"
             "- Do not use generic placeholders if the user provided real details.\n"
             "- If details are missing, state reasonable assumptions and continue with useful guidance.\n"
             "- Ask at most one clarifying question, and place it after the useful answer.\n"
+            "- If the request could mean multiple things, answer from the strongest interpretation first and then ask which meaning the user intended.\n"
+            "- If the user's meaning is unclear, end with a natural follow-up asking what they want to clarify or continue with next.\n"
             "- For writing tasks, produce the actual draft before explaining it.\n"
             "- For sales or marketing tasks, include offer, audience, channel, CTA, follow-up, and improvement advice when relevant.\n"
             "- For analysis tasks, include metrics, method, evidence, interpretation, and recommendation when relevant.\n"
@@ -990,7 +1086,8 @@ class AgentService:
             "- Do not invent facts, policies, prices, or private data.\n"
             "- Avoid repeating the same answer across turns; use the latest message and conversation history.\n\n"
             "Formatting rules:\n"
-            "- Use clean Markdown when it improves readability.\n"
+            "- Use normal text by default.\n"
+            "- Use clean Markdown only when it improves readability.\n"
             "- Use short headings, numbered steps, bullets, or tables based on the user's request.\n"
             "- Keep the answer easy to scan, but include enough substance to be useful.\n\n"
             "Missing information:\n"
@@ -1041,3 +1138,4 @@ class AgentService:
         deleted = await self._agents.delete_owned(agent_id, user.id or "")
         if not deleted:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        await self._chats.delete_for_agent(agent_id)

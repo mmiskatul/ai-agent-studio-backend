@@ -14,7 +14,12 @@ class AgentRepository(BaseRepository[AgentDocument]):
 
     async def list_by_user(self, user_id: str) -> list[AgentDocument]:
         cursor = self.collection.find({"user_id": user_id}).sort("created_at", -1)
-        return [self.document_class.from_mongo(item) async for item in cursor]
+        agents: list[AgentDocument] = []
+        async for item in cursor:
+            agent = self.document_class.from_mongo(item)
+            if agent is not None:
+                agents.append(agent)
+        return agents
 
     async def get_owned(self, agent_id: str, user_id: str) -> AgentDocument | None:
         if not ObjectId.is_valid(agent_id):

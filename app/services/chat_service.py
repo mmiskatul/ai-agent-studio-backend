@@ -401,7 +401,6 @@ class ChatService:
             for term in ("health", "medical", "wellness", "doctor", "clinic", "patient")
         ):
             return (
-                f"{agent_config.name} received your request: {cleaned_message}\n\n"
                 "I can help organize health questions, explain general wellness information, "
                 "prepare symptom notes, and suggest safe next steps to discuss with a qualified "
                 "clinician.\n\n"
@@ -416,7 +415,6 @@ class ChatService:
             for term in ("analytics", "analyst", "analysis", "data", "metric", "report")
         ):
             return (
-                f"{agent_config.name} received your request: {cleaned_message}\n\n"
                 "I can help analyze sales performance, define metrics, compare channels, "
                 "summarize trends, and turn numbers into clear recommendations.\n\n"
                 "To move forward, share the data, time period, metric, segment, or business "
@@ -426,7 +424,6 @@ class ChatService:
 
         if any(term in agent_text for term in ("sales", "lead", "revenue", "buyer")):
             return (
-                f"{agent_config.name} received your request: {cleaned_message}\n\n"
                 "I can help with sales messaging, lead qualification, product positioning, "
                 "objection handling, follow-up scripts, and conversion next steps.\n\n"
                 "To move forward, share the product or service, target customer, channel, "
@@ -436,7 +433,6 @@ class ChatService:
 
         if any(term in agent_text for term in ("support", "help", "service", "customer")):
             return (
-                f"{agent_config.name} received your request: {cleaned_message}\n\n"
                 "Likely next steps:\n"
                 "1. Confirm the exact issue, affected account or product, and when it started.\n"
                 "2. Check whether this is isolated to one user, one browser, one device, "
@@ -452,7 +448,6 @@ class ChatService:
             )
 
         return (
-            f"{agent_config.name} received your request: {cleaned_message}\n\n"
             f"Focus: {agent_focus}\n\n"
             "I could not reach the configured LLM provider, so this local fallback is being used. "
             "Review the request, identify the goal, list the missing context, and provide "

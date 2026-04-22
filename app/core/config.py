@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from functools import lru_cache
 from typing import Annotated
 
@@ -81,6 +82,22 @@ class Settings(BaseSettings):
         if self.llm_engine_options:
             return self.llm_engine_options[0]["value"]
         return ""
+
+    @property
+    def resolved_backend_cors_origins(self) -> list[str]:
+        return [origin for origin in self.backend_cors_origins if "*" not in origin]
+
+    @property
+    def resolved_backend_cors_origin_regex(self) -> str | None:
+        wildcard_origins = [origin for origin in self.backend_cors_origins if "*" in origin]
+        if not wildcard_origins:
+            return None
+
+        patterns = [
+            re.escape(origin).replace(r"\*", ".*")
+            for origin in wildcard_origins
+        ]
+        return f"^(?:{'|'.join(patterns)})$"
 
 
 @lru_cache

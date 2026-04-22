@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import ObjectId
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 def now_utc() -> datetime:
@@ -23,10 +23,13 @@ class MongoDocument(BaseModel):
         data = dict(data)
         if "_id" in data and isinstance(data["_id"], ObjectId):
             data["_id"] = str(data["_id"])
-        return cls.model_validate(data)
+        try:
+            return cls.model_validate(data)
+        except ValidationError:
+            return None
 
     def to_mongo(self) -> dict[str, Any]:
         data = self.model_dump(by_alias=True, exclude_none=True)
-        if "_id" in data and isinstance(data["_id"], str):
+        if "_id" in data and isinstance(data["_id"], str) and ObjectId.is_valid(data["_id"]):
             data["_id"] = ObjectId(data["_id"])
         return data
