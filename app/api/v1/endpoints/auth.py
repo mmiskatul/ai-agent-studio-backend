@@ -11,6 +11,8 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     ForgotPasswordVerifyRequest,
     LoginRequest,
+    ProfileResponse,
+    ProfileUpdateRequest,
     RefreshTokenRequest,
     RegisterRequest,
     SigninRequest,
@@ -87,4 +89,26 @@ async def verify_forgot_password(
 
 @router.get("/me", response_model=AuthUserResponse)
 async def me(current_user: UserDocument = Depends(get_current_user)) -> AuthUserResponse:
-    return AuthUserResponse(id=current_user.id or "", email=current_user.email)
+    return AuthUserResponse(
+        id=current_user.id or "",
+        email=current_user.email,
+        display_name=current_user.display_name,
+        profile_image=current_user.profile_image,
+    )
+
+
+@router.get("/profile", response_model=ProfileResponse)
+async def profile(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+) -> ProfileResponse:
+    return await factory.auth_service.get_profile(current_user)
+
+
+@router.patch("/profile", response_model=ProfileResponse)
+async def update_profile(
+    payload: ProfileUpdateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+) -> ProfileResponse:
+    return await factory.auth_service.update_profile(current_user, payload)

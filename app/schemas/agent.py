@@ -59,6 +59,7 @@ class LLMEngineOptionsResponse(BaseModel):
 class AgentConfigResponse(BaseModel):
     id: str
     name: str
+    role: str
     description: str
     system_prompt: str
     tools: list[str]
@@ -82,6 +83,55 @@ class AgentRouteResponse(BaseModel):
     agent_name: str
     description: str
     tools: list[str]
+
+
+class AgentResponseGenerateRequest(BaseModel):
+    content: str = Field(min_length=1)
+    chat_id: str | None = None
+
+
+class MemorySummary(BaseModel):
+    title: str = ""
+    description: str = ""
+
+
+class AgentResponseGenerateResponse(BaseModel):
+    agent_id: str
+    agent_name: str
+    chat_id: str
+    content: str
+    memory_summary: MemorySummary
+
+
+class AgentResponseMessage(BaseModel):
+    id: str
+    chat_id: str
+    sender_type: str
+    content: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentResponseHistoryResponse(BaseModel):
+    agent_id: str
+    agent_name: str
+    chat_id: str | None = None
+    memory_summary: MemorySummary
+    messages: list[AgentResponseMessage]
+
+
+class AgentResponsePageCreateRequest(BaseModel):
+    title: str | None = None
+
+
+class AgentResponsePage(BaseModel):
+    id: str
+    agent_id: str
+    title: str | None = None
+    memory_summary: MemorySummary
+    message_count: int
+    created_at: datetime
+    updated_at: datetime
 
 
 class AgentRegistryRebuildResponse(BaseModel):

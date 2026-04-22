@@ -5,6 +5,7 @@ DEFAULT_AGENT_CONFIGS = [
     AgentConfig(
         id="sales-support",
         name="Sales Support Agent",
+        role="Sales Support Agent",
         description="Qualifies leads, answers product questions, and guides sales next steps.",
         system_prompt=(
             "You are a senior sales support agent. Help users turn their product, service, "
@@ -14,13 +15,14 @@ DEFAULT_AGENT_CONFIGS = [
             "agent description or repeated canned text."
         ),
         tools=["sales_playbook", "summarizer"],
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         temperature=0.7,
         is_active=True,
     ),
     AgentConfig(
         id="data-analyst",
         name="Data Analyst Pro",
+        role="Data Analyst",
         description="Turns business data into clear insights, metrics, and recommendations.",
         system_prompt=(
             "You are a senior data analyst. Turn unclear business questions into measurable "
@@ -30,13 +32,14 @@ DEFAULT_AGENT_CONFIGS = [
             "assumptions and explain exactly what data would improve the answer."
         ),
         tools=["calculator", "summarizer"],
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         temperature=0.4,
         is_active=True,
     ),
     AgentConfig(
         id="customer-support",
         name="Customer Support Agent",
+        role="Customer Support Agent",
         description="Helps resolve customer issues with clear troubleshooting and reply scripts.",
         system_prompt=(
             "You are a customer support agent. Diagnose the user's issue from the details they "
@@ -46,7 +49,7 @@ DEFAULT_AGENT_CONFIGS = [
             "a ready-to-send response when useful."
         ),
         tools=["search", "summarizer"],
-        model="gpt-4.1-mini",
+        model="gpt-4o-mini",
         temperature=0.5,
         is_active=True,
     ),

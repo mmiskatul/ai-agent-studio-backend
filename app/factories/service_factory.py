@@ -13,7 +13,7 @@ class ServiceFactory:
 
     @property
     def auth_service(self) -> AuthService:
-        return AuthService(self._uow.users)
+        return AuthService(self._uow.users, self._uow.agents, self._uow.chats)
 
     @property
     def agent_service(self) -> AgentService:

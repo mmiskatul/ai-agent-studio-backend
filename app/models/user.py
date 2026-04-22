@@ -7,6 +7,8 @@ from app.models.base import MongoDocument
 
 class UserDocument(MongoDocument):
     email: EmailStr
+    display_name: str | None = None
+    profile_image: str | None = None
     hashed_password: str
     is_active: bool = True
     is_email_verified: bool = False

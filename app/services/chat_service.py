@@ -267,7 +267,7 @@ class ChatService:
         platform = AgentPlatform(
             configs=[runtime_agent],
             tool_registry=default_tool_registry(),
-            llm=self._generate_openai_response,
+            fallback=self._generate_fallback_response,
         )
         return await platform.run(content, agent_key=runtime_agent.id, history=history)
 
@@ -275,6 +275,7 @@ class ChatService:
         return AgentConfig(
             id=agent.id or agent.name,
             name=agent.name,
+            role=agent.role,
             description=agent.purpose,
             system_prompt=self._build_runtime_system_prompt(agent),
             tools=agent.tools or self._infer_tool_names(agent),
@@ -333,12 +334,16 @@ class ChatService:
             return None
 
         try:
-            from openai import APIError, APIStatusError, AsyncOpenAI, RateLimitError
+            from openai import (
+                APIConnectionError,
+                APIError,
+                APIStatusError,
+                AsyncOpenAI,
+                RateLimitError,
+            )
         except ImportError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="OpenAI SDK is not installed. Run pip install -r backend/requirements.txt.",
-            ) from exc
+            _ = exc
+            return None
 
         client = AsyncOpenAI(api_key=settings.openai_api_key)
         input_messages = self._openai_input_messages(agent_config, message, history)
@@ -349,13 +354,110 @@ class ChatService:
                 input=input_messages,
                 temperature=agent_config.temperature,
             )
-        except (RateLimitError, APIStatusError, APIError):
+        except RateLimitError as exc:
+            _ = exc
             return None
+        except APIConnectionError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=(
+                    "Could not connect to OpenAI from the backend server. Check internet "
+                    "access, firewall, or proxy settings."
+                ),
+            ) from exc
+        except APIStatusError as exc:
+            detail = getattr(exc, "message", None) or str(exc)
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"OpenAI API returned an error: {detail}",
+            ) from exc
+        except APIError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"OpenAI API request failed: {exc}",
+            ) from exc
 
         output_text = getattr(response, "output_text", None)
         if output_text and output_text.strip():
             return output_text.strip()
-        return None
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="OpenAI returned an empty response. Try again or use a different model.",
+        )
+
+    def _generate_fallback_response(self, agent_config: AgentConfig, message: str) -> str:
+        cleaned_message = " ".join(message.strip().split())
+        agent_focus = agent_config.description.strip()
+        agent_text = " ".join(
+            [
+                agent_config.name,
+                agent_config.role,
+                agent_config.description,
+            ],
+        ).lower()
+
+        if any(
+            term in agent_text
+            for term in ("health", "medical", "wellness", "doctor", "clinic", "patient")
+        ):
+            return (
+                f"{agent_config.name} received your request: {cleaned_message}\n\n"
+                "I can help organize health questions, explain general wellness information, "
+                "prepare symptom notes, and suggest safe next steps to discuss with a qualified "
+                "clinician.\n\n"
+                "Share the health topic, symptoms, duration, age range, medications, and any "
+                "urgent warning signs. If symptoms are severe, sudden, worsening, or involve "
+                "chest pain, trouble breathing, fainting, severe bleeding, or confusion, seek "
+                "urgent medical care now."
+            )
+
+        if any(
+            term in agent_text
+            for term in ("analytics", "analyst", "analysis", "data", "metric", "report")
+        ):
+            return (
+                f"{agent_config.name} received your request: {cleaned_message}\n\n"
+                "I can help analyze sales performance, define metrics, compare channels, "
+                "summarize trends, and turn numbers into clear recommendations.\n\n"
+                "To move forward, share the data, time period, metric, segment, or business "
+                "question you want answered. For example, I can review conversion rate, revenue "
+                "by channel, lead quality, pipeline movement, or campaign performance."
+            )
+
+        if any(term in agent_text for term in ("sales", "lead", "revenue", "buyer")):
+            return (
+                f"{agent_config.name} received your request: {cleaned_message}\n\n"
+                "I can help with sales messaging, lead qualification, product positioning, "
+                "objection handling, follow-up scripts, and conversion next steps.\n\n"
+                "To move forward, share the product or service, target customer, channel, "
+                "and the sales goal. For example, I can draft a buyer reply, improve an offer, "
+                "write outreach copy, or build a follow-up plan."
+            )
+
+        if any(term in agent_text for term in ("support", "help", "service", "customer")):
+            return (
+                f"{agent_config.name} received your request: {cleaned_message}\n\n"
+                "Likely next steps:\n"
+                "1. Confirm the exact issue, affected account or product, and when it started.\n"
+                "2. Check whether this is isolated to one user, one browser, one device, "
+                "or all users.\n"
+                "3. Try the lowest-risk fix first, such as refreshing the session, "
+                "checking settings, or reproducing the issue with a clean login.\n"
+                "4. Escalate with screenshots, timestamps, account ID, error text, "
+                "and reproduction steps if the issue continues.\n\n"
+                "Customer reply draft:\n"
+                "Thanks for the details. I am checking the likely cause now. Please send the exact "
+                "error text, when it started, and whether it happens on another browser or device "
+                "so we can narrow this down quickly."
+            )
+
+        return (
+            f"{agent_config.name} received your request: {cleaned_message}\n\n"
+            f"Focus: {agent_focus}\n\n"
+            "I could not reach the configured LLM provider, so this local fallback is being used. "
+            "Review the request, identify the goal, list the missing context, and provide "
+            "practical next steps based on the agent's purpose."
+        )
 
     def _openai_input_messages(
         self,

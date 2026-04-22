@@ -5,6 +5,8 @@ from fastapi import HTTPException, status
 from app.core.config import settings
 from app.core.security import email_code_generator, password_hasher, token_service
 from app.models.user import UserDocument
+from app.repositories.agent_repository import AgentRepository
+from app.repositories.chat_repository import ChatRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
     AccessTokenResponse,
@@ -13,6 +15,11 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     ForgotPasswordVerifyRequest,
     LoginRequest,
+    ProfileLatestAgentResponse,
+    ProfileLatestConversationResponse,
+    ProfileResponse,
+    ProfileStatsResponse,
+    ProfileUpdateRequest,
     RefreshTokenRequest,
     RegisterRequest,
     TokenResponse,
@@ -21,8 +28,15 @@ from app.services.email_service import email_sender
 
 
 class AuthService:
-    def __init__(self, users: UserRepository) -> None:
+    def __init__(
+        self,
+        users: UserRepository,
+        agents: AgentRepository | None = None,
+        chats: ChatRepository | None = None,
+    ) -> None:
         self._users = users
+        self._agents = agents
+        self._chats = chats
 
     async def register(self, payload: RegisterRequest) -> EmailValidationRequiredResponse:
         email = payload.email.lower()
@@ -140,13 +154,85 @@ class AuthService:
     async def get_user_by_id(self, user_id: str) -> UserDocument | None:
         return await self._users.get_by_id(user_id)
 
+    async def get_profile(self, user: UserDocument) -> ProfileResponse:
+        agents = await self._agents.list_by_user(user.id or "") if self._agents else []
+        chats = await self._chats.list_by_user(user.id or "") if self._chats else []
+        message_counts_by_chat = (
+            await self._chats.count_messages_by_chat_ids([chat.id or "" for chat in chats if chat.id])
+            if self._chats
+            else {}
+        )
+        latest_agent = agents[0] if agents else None
+        latest_chat = chats[0] if chats else None
+
+        return ProfileResponse(
+            id=user.id or "",
+            email=user.email,
+            display_name=user.display_name,
+            profile_image=user.profile_image,
+            is_active=user.is_active,
+            is_email_verified=user.is_email_verified,
+            created_at=user.created_at,
+            updated_at=user.updated_at,
+            stats=ProfileStatsResponse(
+                total_agents=len(agents),
+                active_agents=sum(1 for agent in agents if agent.status == "active"),
+                inactive_agents=sum(1 for agent in agents if agent.status != "active"),
+                total_messages=sum(message_counts_by_chat.values()),
+            ),
+            latest_agent=(
+                ProfileLatestAgentResponse(
+                    id=latest_agent.id or "",
+                    name=latest_agent.name,
+                    created_at=latest_agent.created_at,
+                )
+                if latest_agent
+                else None
+            ),
+            latest_conversation=(
+                ProfileLatestConversationResponse(
+                    chat_id=latest_chat.id or "",
+                    agent_id=latest_chat.agent_id,
+                    agent_name=next(
+                        (agent.name for agent in agents if agent.id == latest_chat.agent_id),
+                        "Unknown Agent",
+                    ),
+                    message_count=message_counts_by_chat.get(latest_chat.id or "", 0),
+                    updated_at=latest_chat.updated_at,
+                )
+                if latest_chat
+                else None
+            ),
+        )
+
+    async def update_profile(
+        self,
+        user: UserDocument,
+        payload: ProfileUpdateRequest,
+    ) -> ProfileResponse:
+        updated_user = await self._users.update_by_id(
+            user.id or "",
+            {
+                "display_name": payload.display_name.strip() if payload.display_name else None,
+                "profile_image": payload.profile_image,
+            },
+        )
+        if updated_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return await self.get_profile(updated_user)
+
     def _token_response(self, user: UserDocument) -> TokenResponse:
         access_token = token_service.create_access_token(subject=user.id or "")
         session_token = token_service.create_session_token(subject=user.id or "")
         return TokenResponse(
             access_token=access_token,
             session_token=session_token,
-            user={"id": user.id or "", "email": user.email},
+            user={
+                "id": user.id or "",
+                "email": user.email,
+                "display_name": user.display_name,
+                "profile_image": user.profile_image,
+            },
         )
 
     def _email_validation_response(

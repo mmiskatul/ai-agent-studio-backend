@@ -6,12 +6,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db.indexes import create_indexes
+from app.db.migrations import migrate_legacy_chat_storage
 from app.db.mongodb import mongo_database
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await mongo_database.connect()
+    await migrate_legacy_chat_storage(mongo_database.db)
     await create_indexes(mongo_database.db)
     yield
     await mongo_database.close()

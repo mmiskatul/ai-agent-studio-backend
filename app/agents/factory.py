@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.agents.config import AgentConfig
+from app.core.config import settings
 from app.tools.base import AgentTool
 from app.tools.registry import ToolRegistry
 
@@ -34,23 +35,26 @@ class AgentRuntime:
         if self.fallback is not None:
             return self.fallback(self.config, message)
 
-        return (
-            f"{self.config.name} could not generate a dynamic response because no LLM runtime "
-            "is available. Configure OPENAI_API_KEY and install backend requirements, then try "
-            "again."
-        )
+        return self._default_fallback(message)
 
     async def _run_langchain_agent(self, message: str, history: list[str]) -> str | None:
         try:
             from langchain.agents import create_agent as langchain_create_agent
+            from langchain_openai import ChatOpenAI
         except ImportError:
             return None
 
         try:
+            llm = ChatOpenAI(
+                model=self._openai_model_name(),
+                temperature=self.config.temperature,
+                api_key=settings.openai_api_key,
+            )
             agent = langchain_create_agent(
-                model=self._langchain_model_name(),
+                model=llm,
                 tools=self._langchain_tools(),
-                system_prompt=self.config.system_prompt,
+                system_prompt=self._langchain_system_prompt(),
+                name=self.config.name,
             )
             messages = self._langchain_messages(message, history)
             if hasattr(agent, "ainvoke"):
@@ -62,10 +66,20 @@ class AgentRuntime:
 
         return self._extract_langchain_output(result)
 
-    def _langchain_model_name(self) -> str:
+    def _openai_model_name(self) -> str:
         if ":" in self.config.model:
-            return self.config.model
-        return f"openai:{self.config.model}"
+            provider, _, model = self.config.model.partition(":")
+            if provider == "openai" and model:
+                return model
+        return self.config.model
+
+    def _langchain_system_prompt(self) -> str:
+        return (
+            f"You are {self.config.name}.\n"
+            f"Role: {self.config.role}\n"
+            f"Description: {self.config.description}\n\n"
+            f"{self.config.system_prompt}"
+        )
 
     def _langchain_tools(self) -> list[Any]:
         try:
@@ -122,6 +136,23 @@ class AgentRuntime:
             if isinstance(output, str) and output.strip():
                 return output.strip()
         return None
+
+    def _default_fallback(self, message: str) -> str:
+        description = self.config.description.strip()
+        prompt = self.config.system_prompt.strip()
+        context = description or prompt or "general assistance"
+        user_message = " ".join(message.strip().split())
+
+        return (
+            f"{self.config.name} is ready to help with {context}.\n\n"
+            "I could not reach a configured LLM provider for this request, so here is the best "
+            "structured response I can provide locally:\n\n"
+            f"- Request: {user_message or 'No message was provided.'}\n"
+            f"- Focus: {context}\n"
+            "- Next step: check the available details, identify the user's goal, and respond with "
+            "specific troubleshooting steps, examples, or a ready-to-send draft based on the "
+            "agent instructions."
+        )
 
 
 def create_agent(

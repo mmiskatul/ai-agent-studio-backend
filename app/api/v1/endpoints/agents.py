@@ -12,6 +12,12 @@ from app.schemas.agent import (
     AgentDescriptionGenerateRequest,
     AgentDescriptionGenerateResponse,
     AgentRegistryRebuildResponse,
+    AgentResponsePage,
+    AgentResponsePageCreateRequest,
+    AgentResponseHistoryResponse,
+    AgentResponseGenerateRequest,
+    AgentResponseGenerateResponse,
+    AgentResponseMessage,
     AgentRouteRequest,
     AgentRouteResponse,
     AgentResponse,
@@ -23,7 +29,6 @@ from app.schemas.agent import (
     LLMEngineOptionsResponse,
     ToolResponse,
 )
-from app.schemas.chat import ChatSendResponse, MessageCreate
 from app.tools.registry import default_tool_registry
 
 router = APIRouter()
@@ -151,19 +156,216 @@ async def generate_agent_welcome_message(
     return AgentWelcomeMessageGenerateResponse(welcome_message=welcome_message)
 
 
-@router.post("/{agent_id}/chat", response_model=ChatSendResponse)
-async def chat_with_agent(
+@router.post("/{agent_id}/response", response_model=AgentResponseGenerateResponse)
+async def generate_agent_response(
     agent_id: str,
-    payload: MessageCreate,
+    payload: AgentResponseGenerateRequest,
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    user_message, assistant_message = await factory.chat_service.send_message(
+    agent, chat, content, memory_summary = await factory.agent_service.generate_agent_response(
         agent_id,
         current_user,
         payload.content,
+        chat_id=payload.chat_id,
     )
-    return ChatSendResponse(user_message=user_message, assistant_message=assistant_message)
+    return AgentResponseGenerateResponse(
+        agent_id=agent.id or "",
+        agent_name=agent.name,
+        chat_id=chat.id or "",
+        content=content,
+        memory_summary=factory.agent_service.parse_memory_summary(memory_summary),
+    )
+
+
+@router.get("/{agent_id}/response/history", response_model=AgentResponseHistoryResponse)
+async def get_agent_response_history(
+    agent_id: str,
+    chat_id: str | None = None,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    agent, chat, messages = await factory.agent_service.get_agent_response_history(
+        agent_id,
+        current_user,
+        chat_id=chat_id,
+    )
+    return AgentResponseHistoryResponse(
+        agent_id=agent.id or "",
+        agent_name=agent.name,
+        chat_id=chat.id if chat else None,
+        memory_summary=factory.agent_service.parse_memory_summary(chat.summary if chat else None),
+        messages=[
+            AgentResponseMessage.model_validate(
+                {
+                    **message.model_dump(),
+                    "id": message.id or "",
+                },
+            )
+            for message in messages
+        ],
+    )
+
+
+@router.get("/{agent_id}/response/pages", response_model=list[AgentResponsePage])
+async def list_agent_response_pages(
+    agent_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    pages = await factory.agent_service.list_agent_response_pages(agent_id, current_user)
+    return [
+        AgentResponsePage(
+            id=chat.id or "",
+            agent_id=chat.agent_id,
+            title=chat.title,
+            memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+            message_count=message_count,
+            created_at=chat.created_at,
+            updated_at=chat.updated_at,
+        )
+        for chat, message_count in pages
+    ]
+
+
+@router.post(
+    "/{agent_id}/response/pages",
+    response_model=AgentResponsePage,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_agent_response_page(
+    agent_id: str,
+    payload: AgentResponsePageCreateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    chat = await factory.agent_service.create_agent_response_page(
+        agent_id,
+        current_user,
+        title=payload.title,
+    )
+    return AgentResponsePage(
+        id=chat.id or "",
+        agent_id=chat.agent_id,
+        title=chat.title,
+        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        message_count=0,
+        created_at=chat.created_at,
+        updated_at=chat.updated_at,
+    )
+
+
+@router.delete("/{agent_id}/response/pages/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_agent_response_page(
+    agent_id: str,
+    chat_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    await factory.chat_service.delete_chat(agent_id, chat_id, current_user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/response/latest", response_model=AgentResponseHistoryResponse)
+async def get_latest_agent_response_history(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    agent, chat, messages = await factory.agent_service.get_latest_agent_response_history(
+        current_user,
+    )
+    return AgentResponseHistoryResponse(
+        agent_id=agent.id or "",
+        agent_name=agent.name,
+        chat_id=chat.id,
+        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        messages=[
+            AgentResponseMessage.model_validate(
+                {
+                    **message.model_dump(),
+                    "id": message.id or "",
+                },
+            )
+            for message in messages
+        ],
+    )
+
+
+@router.delete("/{agent_id}/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_chat(
+    agent_id: str,
+    chat_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    await factory.chat_service.delete_chat(agent_id, chat_id, current_user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.patch(
+    "/{agent_id}/response/messages/{message_id}",
+    response_model=AgentResponseHistoryResponse,
+)
+async def update_agent_response_message(
+    agent_id: str,
+    message_id: str,
+    payload: AgentResponseGenerateRequest,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    agent, chat, messages = await factory.agent_service.update_agent_response_message(
+        agent_id,
+        current_user,
+        message_id,
+        payload.content,
+    )
+    return AgentResponseHistoryResponse(
+        agent_id=agent.id or "",
+        agent_name=agent.name,
+        chat_id=chat.id,
+        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        messages=[
+            AgentResponseMessage.model_validate(
+                {
+                    **message.model_dump(),
+                    "id": message.id or "",
+                },
+            )
+            for message in messages
+        ],
+    )
+
+
+@router.delete(
+    "/{agent_id}/response/messages/{message_id}",
+    response_model=AgentResponseHistoryResponse,
+)
+async def delete_agent_response_message(
+    agent_id: str,
+    message_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    agent, chat, messages = await factory.agent_service.delete_agent_response_message(
+        agent_id,
+        current_user,
+        message_id,
+    )
+    return AgentResponseHistoryResponse(
+        agent_id=agent.id or "",
+        agent_name=agent.name,
+        chat_id=chat.id,
+        memory_summary=factory.agent_service.parse_memory_summary(chat.summary),
+        messages=[
+            AgentResponseMessage.model_validate(
+                {
+                    **message.model_dump(),
+                    "id": message.id or "",
+                },
+            )
+            for message in messages
+        ],
+    )
 
 
 @router.get("/{agent_id}", response_model=AgentResponse)

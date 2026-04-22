@@ -1,3 +1,4 @@
+import json
 from datetime import timedelta
 
 from fastapi import HTTPException, status
@@ -10,6 +11,7 @@ from app.agents.state import runtime_agent_registry
 from app.core.config import settings
 from app.models.agent import AgentDocument
 from app.models.base import now_utc
+from app.models.chat import ChatDocument, MessageDocument
 from app.models.user import UserDocument
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.chat_repository import ChatRepository
@@ -25,6 +27,11 @@ from app.schemas.agent import (
     AgentSystemPromptGenerateRequest,
     AgentUpdate,
     AgentWelcomeMessageGenerateRequest,
+    MemorySummary,
+)
+from app.services.agent_response_prompt import (
+    AgentResponsePromptBuilder,
+    parse_agent_json_response,
 )
 from app.tools.registry import default_tool_registry
 
@@ -33,6 +40,44 @@ class AgentService:
     def __init__(self, agents: AgentRepository, chats: ChatRepository) -> None:
         self._agents = agents
         self._chats = chats
+        self._response_prompt_builder = AgentResponsePromptBuilder()
+
+    def parse_memory_summary(self, summary: str | None) -> MemorySummary:
+        if not summary or not summary.strip():
+            return MemorySummary()
+
+        trimmed_summary = summary.strip()
+        if trimmed_summary.startswith("{"):
+            try:
+                parsed = json.loads(trimmed_summary)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                title = parsed.get("title")
+                description = parsed.get("description")
+                return MemorySummary(
+                    title=title.strip() if isinstance(title, str) else "",
+                    description=description.strip() if isinstance(description, str) else "",
+                )
+
+        return MemorySummary(description=trimmed_summary)
+
+    def _serialize_memory_summary(self, summary: MemorySummary) -> str:
+        return json.dumps(
+            {
+                "title": summary.title.strip(),
+                "description": summary.description.strip(),
+            }
+        )
+
+    def _memory_summary_text(self, summary: str | None) -> str:
+        parsed_summary = self.parse_memory_summary(summary)
+        summary_parts = []
+        if parsed_summary.title:
+            summary_parts.append(f"Title: {parsed_summary.title}")
+        if parsed_summary.description:
+            summary_parts.append(parsed_summary.description)
+        return "\n".join(summary_parts).strip()
 
     async def list_agents(self, user: UserDocument) -> list[AgentResponse]:
         user_id = user.id or ""
@@ -130,6 +175,431 @@ class AgentService:
             tools=agent.config.tools,
         )
 
+    async def generate_agent_response(
+        self,
+        agent_id: str,
+        user: UserDocument,
+        content: str,
+        chat_id: str | None = None,
+    ) -> tuple[AgentDocument, ChatDocument, str, str]:
+        agent = await self._get_agent_document(agent_id, user)
+        config = self._agent_config(agent)
+        if not config.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This agent is inactive and cannot generate responses.",
+            )
+
+        chat = await self._get_or_create_memory_chat(agent, user, content, chat_id=chat_id)
+        user_message = await self._chats.add_message(
+            MessageDocument(chat_id=chat.id or "", sender_type="user", content=content),
+        )
+        messages = await self._chats.list_messages(chat.id or "")
+        response = await self._generate_memory_response(
+            agent=agent,
+            config=config,
+            chat=chat,
+            current_message=user_message,
+            messages=messages,
+        )
+        parsed_response = parse_agent_json_response(response)
+        assistant_message = await self._chats.add_message(
+            MessageDocument(
+                chat_id=chat.id or "",
+                sender_type="assistant",
+                content=parsed_response.response,
+            ),
+        )
+        memory_summary = self._build_memory_summary(
+            previous_summary=chat.summary or "",
+            system_summary=parsed_response.system_summary,
+            messages=[*messages, assistant_message],
+        )
+        await self._chats.update_chat_summary(chat.id or "", memory_summary)
+        chat.summary = memory_summary
+        await self._apply_summary_title(chat, memory_summary)
+        return agent, chat, parsed_response.response, memory_summary
+
+    async def get_agent_response_history(
+        self,
+        agent_id: str,
+        user: UserDocument,
+        chat_id: str | None = None,
+    ) -> tuple[AgentDocument, ChatDocument | None, list[MessageDocument]]:
+        agent = await self._get_agent_document(agent_id, user)
+        chat = (
+            await self._chats.get_owned_chat(user.id or "", agent.id or "", chat_id)
+            if chat_id
+            else await self._chats.get_for_agent(user.id or "", agent.id or "")
+        )
+        if chat is None:
+            return agent, None, []
+        messages = await self._chats.list_messages(chat.id or "")
+        return agent, chat, messages
+
+    async def list_agent_response_pages(
+        self,
+        agent_id: str,
+        user: UserDocument,
+    ) -> list[tuple[ChatDocument, int]]:
+        agent = await self._get_agent_document(agent_id, user)
+        chats = await self._chats.list_by_agent(user.id or "", agent.id or "")
+        message_counts = await self._chats.count_messages_by_chat_ids(
+            [chat.id or "" for chat in chats if chat.id],
+        )
+        return [(chat, message_counts.get(chat.id or "", 0)) for chat in chats]
+
+    async def create_agent_response_page(
+        self,
+        agent_id: str,
+        user: UserDocument,
+        title: str | None = None,
+    ) -> ChatDocument:
+        agent = await self._get_agent_document(agent_id, user)
+        config = self._agent_config(agent)
+        if not config.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This agent is inactive and cannot create response pages.",
+            )
+        return await self._chats.create(
+            ChatDocument(
+                user_id=user.id or "",
+                agent_id=agent.id or "",
+                title=title.strip() if title and title.strip() else "New page",
+            ),
+        )
+
+    async def get_latest_agent_response_history(
+        self,
+        user: UserDocument,
+    ) -> tuple[AgentDocument, ChatDocument, list[MessageDocument]]:
+        chat = await self._chats.get_latest_for_user(user.id or "")
+        if chat is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+
+        agent = await self._get_agent_document(chat.agent_id, user)
+        messages = await self._chats.list_messages(chat.id or "")
+        return agent, chat, messages
+
+    async def update_agent_response_message(
+        self,
+        agent_id: str,
+        user: UserDocument,
+        message_id: str,
+        content: str,
+    ) -> tuple[AgentDocument, ChatDocument, list[MessageDocument]]:
+        agent = await self._get_agent_document(agent_id, user)
+        config = self._agent_config(agent)
+        if not config.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This agent is inactive and cannot generate responses.",
+            )
+
+        chat, message = await self._get_owned_response_message(agent, user, message_id)
+        if message.sender_type != "user":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only user messages can be edited.",
+            )
+
+        updated_user_message = await self._chats.update_message_content(message.id or "", content)
+        if updated_user_message is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+        next_assistant = await self._chats.get_next_assistant_message(
+            chat.id or "",
+            message.created_at,
+        )
+        messages = await self._chats.list_messages(chat.id or "")
+        prompt_messages = [
+            item for item in messages if next_assistant is None or item.id != next_assistant.id
+        ]
+        response = await self._generate_memory_response(
+            agent=agent,
+            config=config,
+            chat=chat,
+            current_message=updated_user_message,
+            messages=prompt_messages,
+        )
+        parsed_response = parse_agent_json_response(response)
+
+        if next_assistant is None:
+            await self._chats.add_message(
+                MessageDocument(
+                    chat_id=chat.id or "",
+                    sender_type="assistant",
+                    content=parsed_response.response,
+                ),
+            )
+        else:
+            updated_assistant = await self._chats.update_message_content(
+                next_assistant.id or "",
+                parsed_response.response,
+            )
+            if updated_assistant is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Message not found",
+                )
+
+        messages = await self._chats.list_messages(chat.id or "")
+        memory_summary = self._build_memory_summary(
+            previous_summary="",
+            system_summary=parsed_response.system_summary,
+            messages=messages,
+        )
+        await self._chats.update_chat_summary(chat.id or "", memory_summary)
+        chat.summary = memory_summary
+        await self._apply_summary_title(chat, memory_summary)
+        return agent, chat, messages
+
+    async def delete_agent_response_message(
+        self,
+        agent_id: str,
+        user: UserDocument,
+        message_id: str,
+    ) -> tuple[AgentDocument, ChatDocument, list[MessageDocument]]:
+        agent = await self._get_agent_document(agent_id, user)
+        config = self._agent_config(agent)
+        if not config.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This agent is inactive and cannot generate responses.",
+            )
+
+        chat, message = await self._get_owned_response_message(agent, user, message_id)
+        paired_assistant = None
+        if message.sender_type == "user":
+            paired_assistant = await self._chats.get_next_assistant_message(
+                chat.id or "",
+                message.created_at,
+            )
+
+        deleted = await self._chats.delete_message(message.id or "")
+        if not deleted:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+        if paired_assistant is not None:
+            await self._chats.delete_message(paired_assistant.id or "")
+
+        messages = await self._chats.list_messages(chat.id or "")
+        memory_summary = self._build_memory_summary(
+            previous_summary="",
+            system_summary="Deleted a message and rebuilt memory from remaining chat history.",
+            messages=messages,
+        )
+        await self._chats.update_chat_summary(chat.id or "", memory_summary)
+        chat.summary = memory_summary
+        await self._apply_summary_title(chat, memory_summary)
+        return agent, chat, messages
+
+    async def _get_or_create_memory_chat(
+        self,
+        agent: AgentDocument,
+        user: UserDocument,
+        content: str,
+        chat_id: str | None = None,
+    ) -> ChatDocument:
+        if chat_id:
+            chat = await self._chats.get_owned_chat(user.id or "", agent.id or "", chat_id)
+            if chat is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Page not found")
+            return chat
+
+        existing = await self._chats.get_for_agent(user.id or "", agent.id or "")
+        if existing is not None:
+            return existing
+
+        return await self._chats.create(
+            ChatDocument(
+                user_id=user.id or "",
+                agent_id=agent.id or "",
+                title="New page",
+            ),
+        )
+
+    async def _get_memory_chat(self, agent: AgentDocument, user: UserDocument) -> ChatDocument:
+        chat = await self._chats.get_for_agent(user.id or "", agent.id or "")
+        if chat is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+        return chat
+
+    async def _get_owned_response_message(
+        self,
+        agent: AgentDocument,
+        user: UserDocument,
+        message_id: str,
+    ) -> tuple[ChatDocument, MessageDocument]:
+        message = await self._chats.get_message(message_id)
+        if message is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        chat = await self._chats.get_owned_chat(user.id or "", agent.id or "", message.chat_id)
+        if chat is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        return chat, message
+
+    async def _get_owned_message(
+        self,
+        chat: ChatDocument,
+        message_id: str,
+    ) -> MessageDocument:
+        message = await self._chats.get_message(message_id)
+        if message is None or message.chat_id != (chat.id or ""):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        return message
+
+    def _build_title(self, content: str) -> str:
+        title = " ".join(content.strip().split())
+        if len(title) <= 80:
+            return title
+        return f"{title[:77].rstrip()}..."
+
+    def _build_summary_title(
+        self,
+        *,
+        previous_summary: MemorySummary,
+        system_summary: str,
+        messages: list[MessageDocument],
+    ) -> str:
+        latest_user_message = next(
+            (
+                " ".join(message.content.strip().split())
+                for message in reversed(messages)
+                if message.sender_type == "user" and message.content.strip()
+            ),
+            "",
+        )
+        if latest_user_message:
+            return self._build_title(latest_user_message)
+        if system_summary.strip():
+            return self._build_title(system_summary.strip())
+        if previous_summary.title.strip():
+            return previous_summary.title.strip()
+        return "New memory"
+
+    async def _apply_summary_title(self, chat: ChatDocument, memory_summary: str) -> None:
+        parsed_summary = self.parse_memory_summary(memory_summary)
+        next_title = parsed_summary.title.strip()
+        if not next_title or not chat.id:
+            return
+        await self._chats.update_chat_title(chat.id, next_title)
+        chat.title = next_title
+
+    async def _generate_memory_response(
+        self,
+        *,
+        agent: AgentDocument,
+        config: AgentConfig,
+        chat: ChatDocument,
+        current_message: MessageDocument,
+        messages: list[MessageDocument],
+    ) -> str:
+        prompt = self._response_prompt_builder.build(
+            agent=agent,
+            config=config,
+            memory_summary=self._memory_summary_text(chat.summary),
+            current_message=current_message.content,
+            messages=messages,
+        )
+        if not settings.openai_api_key:
+            return self._fallback_agent_response(
+                config,
+                current_message.content,
+                self._memory_summary_text(chat.summary),
+            )
+
+        try:
+            from openai import (
+                APIConnectionError,
+                APIError,
+                APIStatusError,
+                AsyncOpenAI,
+                RateLimitError,
+            )
+        except ImportError:
+            return self._fallback_agent_response(
+                config,
+                current_message.content,
+                self._memory_summary_text(chat.summary),
+            )
+
+        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        try:
+            response = await client.responses.create(
+                model=config.model or settings.default_llm_engine,
+                instructions=self._response_prompt_builder.json_instructions,
+                input=prompt,
+                temperature=config.temperature,
+            )
+        except (APIConnectionError, APIError, APIStatusError, RateLimitError):
+            return self._fallback_agent_response(
+                config,
+                current_message.content,
+                self._memory_summary_text(chat.summary),
+            )
+
+        output_text = getattr(response, "output_text", None)
+        if output_text and output_text.strip():
+            return output_text.strip()
+        return self._fallback_agent_response(
+            config,
+            current_message.content,
+            self._memory_summary_text(chat.summary),
+        )
+
+    def _build_memory_summary(
+        self,
+        *,
+        previous_summary: str,
+        system_summary: str,
+        messages: list[MessageDocument],
+    ) -> str:
+        parsed_previous_summary = self.parse_memory_summary(previous_summary)
+        recent_items = [
+            f"{message.sender_type}: {' '.join(message.content.split())}"
+            for message in messages[-8:]
+            if message.content.strip()
+        ]
+        summary_parts: list[str] = []
+        if parsed_previous_summary.description.strip():
+            summary_parts.append(parsed_previous_summary.description.strip())
+        if system_summary.strip():
+            summary_parts.append("Latest internal summary: " + system_summary.strip())
+        if recent_items:
+            summary_parts.append("Recent context: " + " | ".join(recent_items))
+        description = "\n".join(summary_parts).strip()
+        if len(description) > 2500:
+            description = description[-2500:].lstrip()
+        summary = MemorySummary(
+            title=self._build_summary_title(
+                previous_summary=parsed_previous_summary,
+                system_summary=system_summary,
+                messages=messages,
+            ),
+            description=description,
+        )
+        return self._serialize_memory_summary(summary)
+
+    def _fallback_agent_response(
+        self,
+        config: AgentConfig,
+        message: str,
+        memory_summary: str,
+    ) -> str:
+        context = config.description.strip()
+        memory_line = (
+            f" I will also use what we already discussed: {memory_summary[:220].strip()}"
+            if memory_summary.strip()
+            else ""
+        )
+        return (
+            f"I can help with {context}.{memory_line}\n\n"
+            f"You said: {message.strip()}\n\n"
+            "Tell me the specific result you want next, and I will respond in this agent's role."
+        )
+
     async def _get_agent_document(self, agent_id: str, user: UserDocument) -> AgentDocument:
         agent = await self._agents.get_owned(agent_id, user.id or "")
         if agent is None:
@@ -224,6 +694,7 @@ class AgentService:
         return AgentConfig(
             id=agent.id or agent.name,
             name=agent.name,
+            role=agent.role,
             description=agent.description or agent.purpose,
             system_prompt=agent.system_prompt,
             tools=agent.tools or self._infer_tools(

@@ -1,13 +1,26 @@
-from app.models.base import MongoDocument
+from datetime import datetime
+from uuid import uuid4
+
+from pydantic import BaseModel, Field
+
+from app.models.base import now_utc
 
 
-class ChatDocument(MongoDocument):
-    user_id: str
-    agent_id: str
-    title: str | None = None
-
-
-class MessageDocument(MongoDocument):
+class MessageDocument(BaseModel):
+    id: str = Field(default_factory=lambda: f"msg_{uuid4().hex}")
     chat_id: str
     sender_type: str
     content: str
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
+
+class ChatDocument(BaseModel):
+    id: str = Field(default_factory=lambda: f"chat_{uuid4().hex}")
+    user_id: str
+    agent_id: str
+    title: str | None = None
+    summary: str | None = None
+    messages: list[MessageDocument] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)

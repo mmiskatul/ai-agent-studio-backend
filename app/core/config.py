@@ -1,4 +1,5 @@
 import json
+import os
 from functools import lru_cache
 from typing import Annotated
 
@@ -7,7 +8,11 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=(".env", "backend/.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     app_name: str = "AgentHub API"
     app_env: str = "development"
@@ -38,10 +43,10 @@ class Settings(BaseSettings):
     openai_agent_model: str = ""
     llm_engine_options: Annotated[list[dict[str, str]], NoDecode] = Field(
         default_factory=lambda: [
+            {"value": "gpt-4o-mini", "label": "GPT-4o mini"},
             {"value": "gpt-4.1-mini", "label": "GPT-4.1 mini"},
             {"value": "gpt-4.1", "label": "GPT-4.1"},
             {"value": "gpt-4o", "label": "GPT-4o"},
-            {"value": "gpt-4o-mini", "label": "GPT-4o mini"},
         ]
     )
 
@@ -84,3 +89,8 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+if settings.openai_api_key:
+    os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
+if settings.openai_agent_model:
+    os.environ.setdefault("OPENAI_AGENT_MODEL", settings.openai_agent_model)

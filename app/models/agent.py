@@ -1,6 +1,7 @@
 from pydantic import Field
 
 from app.models.base import MongoDocument
+from app.models.chat import ChatDocument
 
 
 class AgentDocument(MongoDocument):
@@ -19,3 +20,4 @@ class AgentDocument(MongoDocument):
     status: str = "active"
     tools: list[str] = Field(default_factory=list)
     is_active: bool = True
+    chats: list[ChatDocument] = Field(default_factory=list)
