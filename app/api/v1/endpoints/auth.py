@@ -11,10 +11,12 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     ForgotPasswordVerifyRequest,
     LoginRequest,
+    MessageResponse,
     ProfileResponse,
     ProfileUpdateRequest,
     RefreshTokenRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     SigninRequest,
     SignupRequest,
     TokenResponse,
@@ -79,12 +81,20 @@ async def forgot_password(
     return await factory.auth_service.forgot_password(payload)
 
 
-@router.post("/forgot-password/verify", response_model=TokenResponse)
+@router.post("/forgot-password/verify", response_model=MessageResponse)
 async def verify_forgot_password(
     payload: ForgotPasswordVerifyRequest,
     factory: ServiceFactory = Depends(get_service_factory),
-) -> TokenResponse:
+) -> MessageResponse:
     return await factory.auth_service.verify_forgot_password(payload)
+
+
+@router.post("/forgot-password/reset", response_model=MessageResponse)
+async def reset_forgot_password(
+    payload: ResetPasswordRequest,
+    factory: ServiceFactory = Depends(get_service_factory),
+) -> MessageResponse:
+    return await factory.auth_service.reset_password(payload)
 
 
 @router.get("/me", response_model=AuthUserResponse)

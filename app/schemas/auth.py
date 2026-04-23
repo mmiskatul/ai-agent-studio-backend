@@ -35,6 +35,12 @@ class ForgotPasswordVerifyRequest(BaseModel):
     code: str = Field(min_length=6, max_length=6)
 
 
+class ResetPasswordRequest(BaseModel):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+    password: str = Field(min_length=6)
+
+
 class RefreshTokenRequest(BaseModel):
     session_token: str = Field(min_length=1)
 
@@ -88,6 +94,10 @@ class ProfileUpdateRequest(BaseModel):
 
 class EmailValidationRequiredResponse(BaseModel):
     email: EmailStr
+    message: str
+
+
+class MessageResponse(BaseModel):
     message: str
 
 

@@ -15,6 +15,7 @@ from app.schemas.auth import (
     ForgotPasswordRequest,
     ForgotPasswordVerifyRequest,
     LoginRequest,
+    MessageResponse,
     ProfileLatestAgentResponse,
     ProfileLatestConversationResponse,
     ProfileResponse,
@@ -22,6 +23,7 @@ from app.schemas.auth import (
     ProfileUpdateRequest,
     RefreshTokenRequest,
     RegisterRequest,
+    ResetPasswordRequest,
     TokenResponse,
 )
 from app.services.email_service import email_sender
@@ -118,7 +120,10 @@ class AuthService:
             email=email,
         )
 
-    async def verify_forgot_password(self, payload: ForgotPasswordVerifyRequest) -> TokenResponse:
+    async def verify_forgot_password(
+        self,
+        payload: ForgotPasswordVerifyRequest,
+    ) -> MessageResponse:
         user = await self._users.get_by_email(payload.email.lower())
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
@@ -129,16 +134,27 @@ class AuthService:
             expires_at=user.password_reset_expires_at,
         )
 
-        updated_user = await self._users.update_by_id(
+        return MessageResponse(message="Reset code verified")
+
+    async def reset_password(self, payload: ResetPasswordRequest) -> MessageResponse:
+        user = await self._users.get_by_email(payload.email.lower())
+        if user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+        self._assert_valid_code(
+            submitted_code=payload.code,
+            stored_code=user.password_reset_code,
+            expires_at=user.password_reset_expires_at,
+        )
+
+        updated_user = await self._users.update_password(
             user.id or "",
-            {
-                "password_reset_code": None,
-                "password_reset_expires_at": None,
-            },
+            password_hasher.hash(payload.password),
         )
         if updated_user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
-        return self._token_response(updated_user)
+
+        return MessageResponse(message="Password updated successfully")
 
     async def refresh_access_token(self, payload: RefreshTokenRequest) -> AccessTokenResponse:
         user_id = token_service.decode_subject(payload.session_token, token_type="session")
