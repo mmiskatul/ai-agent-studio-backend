@@ -15,6 +15,8 @@ def format_response_node():
             },
             "system_summary": state.get("system_summary", ""),
             "response": state.get("final_response", ""),
+            "markdown": state.get("markdown_response", state.get("final_response", "")),
+            "render_mode": state.get("response_render_mode", "plain"),
             "routing_reason": state.get("routing_reason", ""),
             "memory_updated": state.get("memory_updated", False),
             "metadata": {

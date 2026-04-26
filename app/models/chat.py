@@ -9,7 +9,10 @@ from app.models.base import MongoDocument, now_utc
 class MessageDocument(BaseModel):
     id: str = Field(default_factory=lambda: f"msg_{uuid4().hex}")
     chat_id: str
+    agent_id: str | None = None
+    user_id: str | None = None
     sender_type: str
+    role: str | None = None
     content: str
     created_at: datetime = Field(default_factory=now_utc)
     updated_at: datetime = Field(default_factory=now_utc)

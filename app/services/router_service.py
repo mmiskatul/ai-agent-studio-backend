@@ -13,7 +13,7 @@ class RouterService:
         agents: list[AgentDocument],
         requested_agent_id: str | None = None,
     ) -> tuple[AgentDocument, str]:
-        active_agents = [agent for agent in agents if agent.is_active and agent.status == "active"]
+        active_agents = [agent for agent in agents if agent.is_active and agent.status == "enabled"]
         if not active_agents:
             fallback = self._default_agent()
             return fallback, "No active database agents were available; used safe default agent."

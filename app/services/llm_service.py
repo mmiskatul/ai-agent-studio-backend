@@ -1,3 +1,5 @@
+import json
+from dataclasses import dataclass
 from logging import getLogger
 from typing import Any
 
@@ -6,6 +8,14 @@ from app.models.agent import AgentDocument
 from app.models.message import MessageRecord
 
 logger = getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class StructuredAgentResponse:
+    system_summary: str
+    response: str
+    markdown: str
+    render_mode: str
 
 
 class LLMService:
@@ -17,7 +27,7 @@ class LLMService:
         memory_summary: str,
         memory_facts: list[str],
         messages: list[MessageRecord],
-    ) -> str:
+    ) -> StructuredAgentResponse:
         prompt = self.build_agent_prompt(
             agent=agent,
             user_message=user_message,
@@ -25,12 +35,17 @@ class LLMService:
             memory_facts=memory_facts,
             messages=messages,
         )
-        return await self._invoke_chat_model(
+        raw_response = await self._invoke_chat_model(
             model=agent.model or agent.llm_engine or settings.default_llm_engine,
             temperature=agent.temperature,
             system_prompt=agent.system_prompt,
             user_prompt=prompt,
             fallback=self._fallback_agent_response(agent, user_message),
+        )
+        return self._parse_structured_agent_response(
+            raw_response=raw_response,
+            agent=agent,
+            user_message=user_message,
         )
 
     async def classify_route(
@@ -112,6 +127,8 @@ class LLMService:
             f"{agent.role}\n\n"
             "Purpose:\n"
             f"{agent.description or agent.purpose}\n\n"
+            "Required Response Language:\n"
+            f"{agent.language or 'EN'}\n\n"
             "Memory Summary:\n"
             f"{memory_summary or 'None'}\n\n"
             "Memory Facts:\n"
@@ -125,6 +142,10 @@ class LLMService:
             "- Be accurate and helpful.\n"
             "- Do not expose internal reasoning.\n"
             "- Use tools only when needed.\n"
+            "- Default to a clean, brief, client-ready answer.\n"
+            "- Keep the tone polished, direct, and easy to scan.\n"
+            "- Prefer short paragraphs or very short bullets over long explanations.\n"
+            "- Do not sound robotic, academic, or over-structured.\n"
             "- Do not force one fixed template for every answer.\n"
             "- First understand the user's intent, then choose the best response format dynamically.\n"
             "- For direct/simple questions, answer directly in plain text or short bullets without unnecessary headings.\n"
@@ -133,19 +154,44 @@ class LLMService:
             "- For rewriting, chatting, email, proposal, or message writing, produce a human, natural, ready-to-use answer; do not make it look like a report unless requested.\n"
             "- For code/debugging, explain briefly, then provide code or concrete steps in proper code fences when useful.\n"
             "- If the question is small, keep the answer small. If the question is deep, make the answer detailed.\n"
+            "- Do not add filler, long introductions, repeated context, or unnecessary closing lines.\n"
+            "- If one strong paragraph solves the request, use one strong paragraph.\n"
+            "- Only expand when the user clearly asks for more detail, multiple options, or a process.\n"
             "- Use the database system prompt as the highest priority instruction.\n"
             "- Use relevant memory and recent conversation without repeating it unnecessarily.\n"
             "- Do not invent private data, prices, policies, or tool results.\n"
             "- If context is missing, state a practical assumption and continue.\n"
-            "- Ask at most one clarifying question, after giving useful help.\n\n"
-            "Output:\n"
-            "- Return only the assistant response text.\n"
-            "- Use Markdown that renders cleanly with remark-gfm when it improves clarity.\n"
-            "- Do not always start with headings.\n"
-            "- Do not always use bullet points.\n"
-            "- Use code fences for code.\n"
-            "- Use bold text only when emphasis helps.\n"
-            "- Do not wrap the answer in JSON."
+            "- Ask at most one clarifying question, after giving useful help.\n"
+            f"- You must answer in {agent.language or 'EN'} unless the user explicitly asks to switch languages.\n"
+            "- Keep the full answer in one language and do not mix languages unless the user asks for that.\n\n"
+            "Output requirements:\n"
+            "- Return only one valid JSON object.\n"
+            "- Do not wrap the JSON in a code block.\n"
+            "- Do not add extra keys.\n"
+            "- Use this exact schema:\n"
+            '{\n'
+            '  "system_summary": "short internal summary for title/memory",\n'
+            '  "response": "plain user-facing answer",\n'
+            '  "markdown": "frontend-friendly markdown version of the same answer",\n'
+            '  "render_mode": "plain|markdown|question_flow"\n'
+            '}\n\n'
+            "Field rules:\n"
+            "- system_summary: one short sentence that names the real topic and what the agent handled.\n"
+            "- response: a clean, brief, client-facing answer in natural text. Default to readable plain text.\n"
+            "- response should usually be 1 short paragraph or a few short bullets unless the request genuinely needs more.\n"
+            "- markdown: GitHub-Flavored Markdown for frontend rendering, but keep it minimal and clean.\n"
+            "- markdown must follow the user's actual question flow instead of any fixed template.\n"
+            "- If the user asked multiple questions, requested a process, or the answer has distinct parts, split markdown by those question-driven parts.\n"
+            "- If the user asked one simple question, keep markdown minimal and natural instead of forcing sections.\n"
+            "- Use headings, bullets, numbered steps, tables, blockquotes, and code fences only when they fit the content.\n"
+            "- Do not force labels like Summary, Overview, Conclusion, or Next Steps unless they are genuinely useful.\n"
+            "- Avoid more than 2 short sections unless the request clearly requires them.\n"
+            "- Avoid long bullet lists unless the user explicitly asks for a list or step-by-step breakdown.\n"
+            "- render_mode must be:\n"
+            "  plain for short conversational answers,\n"
+            "  markdown for structured answers,\n"
+            "  question_flow when the markdown is organized around the user's questions or sub-questions.\n"
+            "- Both response and markdown must say the same core thing, just formatted differently for frontend use."
         )
 
     async def _invoke_chat_model(
@@ -244,18 +290,26 @@ class LLMService:
         return model.split(":", 1)[1] if model.startswith("openai:") else model
 
     def _fallback_agent_response(self, agent: AgentDocument, user_message: str) -> str:
-        return (
-            f"{agent.name} received your request and is configured for {agent.role}.\n\n"
-            f"Request: {user_message.strip()}\n\n"
-            "Here is the best response I can provide from the available agent configuration: "
-            f"focus on {agent.description or agent.purpose or agent.role}, use the recent "
-            "conversation context, and answer with clear next steps. Please share any missing "
-            "details if you want a more specific follow-up."
+        return json.dumps(
+            {
+                "system_summary": (
+                    f"{agent.name} handled a request about "
+                    f"{self._trim_summary('', user_message)[:120].strip() or agent.role}."
+                ),
+                "response": (
+                    f"{agent.name} is ready to help with {agent.description or agent.purpose or agent.role}. "
+                    "Share the exact task or a bit more detail, and the next reply can be more specific."
+                ),
+                "markdown": (
+                    f"{agent.name} is ready to help with "
+                    f"{agent.description or agent.purpose or agent.role}. "
+                    "Share the exact task or a bit more detail, and the next reply can be more specific."
+                ),
+                "render_mode": "plain",
+            }
         )
 
     def _parse_json_object(self, value: str) -> dict[str, Any] | None:
-        import json
-
         if not value.strip().startswith("{"):
             return None
         try:
@@ -267,3 +321,73 @@ class LLMService:
     def _trim_summary(self, previous_summary: str, user_message: str) -> str:
         text = " ".join([previous_summary.strip(), user_message.strip()]).strip()
         return text[:1200]
+
+    def _parse_structured_agent_response(
+        self,
+        *,
+        raw_response: str,
+        agent: AgentDocument,
+        user_message: str,
+    ) -> StructuredAgentResponse:
+        parsed = self._parse_json_object(self._extract_json_payload(raw_response))
+        if isinstance(parsed, dict):
+            response = str(parsed.get("response") or "").strip()
+            markdown = str(parsed.get("markdown") or "").strip()
+            render_mode = str(parsed.get("render_mode") or "").strip().lower()
+            system_summary = str(parsed.get("system_summary") or "").strip()
+            if response:
+                final_markdown = markdown or response
+                final_render_mode = (
+                    render_mode if render_mode in {"plain", "markdown", "question_flow"} else
+                    self._infer_render_mode(final_markdown, response)
+                )
+                return StructuredAgentResponse(
+                    system_summary=system_summary or self._build_system_summary(agent, user_message),
+                    response=response,
+                    markdown=final_markdown,
+                    render_mode=final_render_mode,
+                )
+
+        fallback_text = raw_response.strip() or self._fallback_text(agent, user_message)
+        return StructuredAgentResponse(
+            system_summary=self._build_system_summary(agent, user_message),
+            response=fallback_text,
+            markdown=fallback_text,
+            render_mode=self._infer_render_mode(fallback_text, fallback_text),
+        )
+
+    def _extract_json_payload(self, value: str) -> str:
+        text = value.strip()
+        if text.startswith("```"):
+            text = text.strip("`").strip()
+            if text.lower().startswith("json"):
+                text = text[4:].strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return text
+        return text[start : end + 1]
+
+    def _build_system_summary(self, agent: AgentDocument, user_message: str) -> str:
+        topic = " ".join(user_message.strip().split())
+        if len(topic) > 100:
+            topic = f"{topic[:97].rstrip()}..."
+        if not topic:
+            topic = agent.role
+        return f"{topic} handled by {agent.name} as {agent.role}."
+
+    def _fallback_text(self, agent: AgentDocument, user_message: str) -> str:
+        parsed = self._parse_json_object(self._fallback_agent_response(agent, user_message))
+        if isinstance(parsed, dict):
+            return str(parsed.get("response") or "").strip()
+        return user_message.strip()
+
+    def _infer_render_mode(self, markdown: str, response: str) -> str:
+        markdown_text = markdown.strip()
+        if any(marker in markdown_text for marker in ("## ", "### ", "- ", "1. ", "|", "```")):
+            if any(token in markdown_text.lower() for token in ("question", "q1", "q2")):
+                return "question_flow"
+            return "markdown"
+        if "\n\n" in markdown_text and markdown_text != response.strip():
+            return "markdown"
+        return "plain"

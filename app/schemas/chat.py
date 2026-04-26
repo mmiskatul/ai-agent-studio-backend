@@ -59,6 +59,8 @@ class ChatStructuredResponse(BaseModel):
     agent: RoutedAgentResponse
     system_summary: str
     response: str
+    markdown: str
+    render_mode: str
     routing_reason: str
     memory_updated: bool
     metadata: dict

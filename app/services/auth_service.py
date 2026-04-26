@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
@@ -171,8 +172,15 @@ class AuthService:
         return await self._users.get_by_id(user_id)
 
     async def get_profile(self, user: UserDocument) -> ProfileResponse:
-        agents = await self._agents.list_by_user(user.id or "") if self._agents else []
-        chats = await self._chats.list_by_user(user.id or "") if self._chats else []
+        agent_summaries, chats = await asyncio.gather(
+            self._agents.list_summaries_by_user(user.id or "")
+            if self._agents
+            else asyncio.sleep(0, result=[]),
+            self._chats.list_by_user(user.id or "", include_messages=False)
+            if self._chats
+            else asyncio.sleep(0, result=[]),
+        )
+        agents = [self._normalize_agent_summary(item) for item in agent_summaries]
         message_counts_by_chat = (
             await self._chats.count_messages_by_chat_ids([chat.id or "" for chat in chats if chat.id])
             if self._chats
@@ -192,15 +200,15 @@ class AuthService:
             updated_at=user.updated_at,
             stats=ProfileStatsResponse(
                 total_agents=len(agents),
-                active_agents=sum(1 for agent in agents if agent.status == "active"),
-                inactive_agents=sum(1 for agent in agents if agent.status != "active"),
+                active_agents=sum(1 for agent in agents if agent["status"] == "enabled"),
+                inactive_agents=sum(1 for agent in agents if agent["status"] != "enabled"),
                 total_messages=sum(message_counts_by_chat.values()),
             ),
             latest_agent=(
                 ProfileLatestAgentResponse(
-                    id=latest_agent.id or "",
-                    name=latest_agent.name,
-                    created_at=latest_agent.created_at,
+                    id=latest_agent["id"],
+                    name=latest_agent["name"],
+                    created_at=latest_agent["created_at"],
                 )
                 if latest_agent
                 else None
@@ -210,7 +218,7 @@ class AuthService:
                     chat_id=latest_chat.id or "",
                     agent_id=latest_chat.agent_id,
                     agent_name=next(
-                        (agent.name for agent in agents if agent.id == latest_chat.agent_id),
+                        (agent["name"] for agent in agents if agent["id"] == latest_chat.agent_id),
                         "Unknown Agent",
                     ),
                     message_count=message_counts_by_chat.get(latest_chat.id or "", 0),
@@ -262,6 +270,14 @@ class AuthService:
             email=email or user.email,
             message=message,
         )
+
+    def _normalize_agent_summary(self, item: dict) -> dict[str, object]:
+        return {
+            "id": str(item.get("_id") or ""),
+            "name": str(item.get("name") or ""),
+            "status": str(item.get("status") or "disabled"),
+            "created_at": item.get("created_at") or datetime.now(timezone.utc),
+        }
 
     def _code_expiry(self) -> datetime:
         return datetime.now(timezone.utc) + timedelta(minutes=settings.email_code_expire_minutes)

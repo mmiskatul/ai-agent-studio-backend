@@ -65,6 +65,6 @@ class MultiChatService:
         return ChatStructuredResponse.model_validate(state["response_json"])
 
     async def history(self, *, user_id: str, session_id: str):
-        chats = await self._chats.list_by_session(user_id, session_id)
+        chats = await self._chats.list_by_session(user_id, session_id, include_messages=False)
         messages = await self._messages.list_by_session(user_id, session_id, limit=500)
         return chats, messages

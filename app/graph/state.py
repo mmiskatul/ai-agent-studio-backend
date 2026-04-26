@@ -22,6 +22,8 @@ class ChatGraphState(TypedDict, total=False):
     memory_facts: list[str]
     tool_results: dict[str, Any]
     final_response: str
+    markdown_response: str
+    response_render_mode: str
     system_summary: str
     memory_updated: bool
     response_json: dict[str, Any]

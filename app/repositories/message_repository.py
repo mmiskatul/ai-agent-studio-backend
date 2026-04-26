@@ -2,7 +2,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.models.base import now_utc
 from app.models.message import MessageRecord
-from app.repositories.base import BaseRepository
+from app.repositories.base import BaseRepository, log_slow_mongo_query, start_mongo_timer
 
 
 class MessageRepository(BaseRepository[MessageRecord]):
@@ -13,12 +13,20 @@ class MessageRepository(BaseRepository[MessageRecord]):
         super().__init__(db)
 
     async def list_by_chat(self, user_id: str, chat_id: str, limit: int = 50) -> list[MessageRecord]:
+        filters = {"user_id": user_id, "chat_id": chat_id}
+        started_at = start_mongo_timer()
         cursor = (
-            self.collection.find({"user_id": user_id, "chat_id": chat_id})
+            self.collection.find(filters)
             .sort("created_at", -1)
             .limit(limit)
         )
         messages = [message async for message in self._iterate(cursor)]
+        log_slow_mongo_query(
+            collection_name=self.collection_name,
+            operation="list_by_chat",
+            started_at=started_at,
+            filters=filters,
+        )
         return list(reversed(messages))
 
     async def list_by_session(
@@ -27,12 +35,20 @@ class MessageRepository(BaseRepository[MessageRecord]):
         session_id: str,
         limit: int = 100,
     ) -> list[MessageRecord]:
+        filters = {"user_id": user_id, "session_id": session_id}
+        started_at = start_mongo_timer()
         cursor = (
-            self.collection.find({"user_id": user_id, "session_id": session_id})
+            self.collection.find(filters)
             .sort("created_at", -1)
             .limit(limit)
         )
         messages = [message async for message in self._iterate(cursor)]
+        log_slow_mongo_query(
+            collection_name=self.collection_name,
+            operation="list_by_session",
+            started_at=started_at,
+            filters=filters,
+        )
         return list(reversed(messages))
 
     async def create_message(self, message: MessageRecord) -> MessageRecord:
@@ -67,16 +83,32 @@ class MessageRepository(BaseRepository[MessageRecord]):
             {"$group": {"_id": "$agent_id", "count": {"$sum": 1}}},
         ]
         counts: dict[str, int] = {}
+        started_at = start_mongo_timer()
         async for item in self.collection.aggregate(pipeline):
             agent_id = item.get("_id")
             if isinstance(agent_id, str) and agent_id:
                 counts[agent_id] = int(item.get("count", 0))
+        log_slow_mongo_query(
+            collection_name=self.collection_name,
+            operation="count_user_messages_by_agent",
+            started_at=started_at,
+            filters={"user_id": user_id, "agent_id": "scoped"},
+        )
         return counts
 
     async def count_messages_by_user(self, user_id: str) -> int:
-        return await self.collection.count_documents(
-            {"user_id": user_id, "agent_id": {"$type": "string", "$ne": ""}},
+        filters = {"user_id": user_id, "agent_id": {"$type": "string", "$ne": ""}}
+        started_at = start_mongo_timer()
+        count = await self.collection.count_documents(
+            filters,
         )
+        log_slow_mongo_query(
+            collection_name=self.collection_name,
+            operation="count_messages_by_user",
+            started_at=started_at,
+            filters={"user_id": user_id, "agent_id": "string"},
+        )
+        return count
 
     async def _iterate(self, cursor):
         async for item in cursor:

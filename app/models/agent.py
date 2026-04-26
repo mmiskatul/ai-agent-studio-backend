@@ -10,7 +10,9 @@ class AgentDocument(MongoDocument):
     role: str
     purpose: str = ""
     description: str | None = None
+    language: str = "EN"
     template_type: str | None = None
+    template_id: str | None = None
     category_tag: str | None = None
     system_prompt: str
     welcome_message: str | None = None

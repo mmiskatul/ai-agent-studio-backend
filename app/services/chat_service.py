@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 
 from fastapi import HTTPException, status
 
@@ -11,6 +12,74 @@ from app.models.user import UserDocument
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.chat_repository import ChatRepository
 from app.tools.registry import default_tool_registry
+
+
+@lru_cache(maxsize=1)
+def _shared_tool_registry():
+    return default_tool_registry()
+
+
+@lru_cache(maxsize=1)
+def _get_openai_client(api_key: str):
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(api_key=api_key)
+
+
+@lru_cache(maxsize=512)
+def _infer_tool_names_cached(
+    name: str,
+    role: str,
+    purpose: str,
+    template_type: str,
+    category_tag: str,
+) -> tuple[str, ...]:
+    role_text = " ".join([name, role, purpose, template_type, category_tag]).lower()
+    tools = ["summarizer"]
+    if any(term in role_text for term in ("sales", "lead", "revenue", "marketing")):
+        tools.append("sales_playbook")
+    if any(term in role_text for term in ("data", "analytics", "report", "metric")):
+        tools.append("calculator")
+    return tuple(tools)
+
+
+@lru_cache(maxsize=512)
+def _runtime_system_prompt_cached(system_prompt: str, language: str) -> str:
+    return (
+        f"{system_prompt.strip()}\n\n"
+        f"Language rules:\n"
+        f"- Default response language is {language}.\n"
+        "- Keep the full response in that language unless the user clearly requests another one.\n\n"
+        "High-quality response rules:\n"
+        "- Answer the user's exact request first; do not introduce yourself or repeat the agent description.\n"
+        "- Do not force one fixed template for every answer.\n"
+        "- First understand the user's intent, then choose the best response format dynamically.\n"
+        "- Choose between plain paragraph, short bullets, numbered steps, headings with sections, table, script, code, analysis, comparison, or troubleshooting flow based on what best fits the request.\n"
+        "- For direct/simple questions, answer directly in plain text or short bullets and avoid unnecessary headings.\n"
+        "- For explanation or teaching, use sections only if helpful; otherwise use natural paragraphs.\n"
+        "- For technical guidance, architecture, roadmap, or analysis, use structured headings and bullets where useful.\n"
+        "- For rewriting, chatting, email, proposal, or message-writing tasks, produce a human, natural, ready-to-use answer; do not make it look like a report unless requested.\n"
+        "- For code/debugging, explain briefly, then provide code or concrete steps in proper code fences when useful.\n"
+        "- If the question is small, keep the answer small. If the question is deep, make the answer detailed.\n"
+        "- Use the agent's role, purpose, available tools, and conversation history to tailor the answer.\n"
+        "- Reuse the user's exact details such as product, channel, audience, numbers, goal, constraints, tone, or platform.\n"
+        "- Give specific, practical, and complete guidance so the user can act without asking the same question again.\n"
+        "- Include concrete examples, scripts, calculations, tables, templates, or ready-to-use copy when useful.\n"
+        "- For sales or marketing questions, include positioning, offer, audience, content/caption, CTA, follow-up, and improvement loop when relevant.\n"
+        "- For support or troubleshooting questions, include likely cause, diagnostic steps, fix steps, escalation rule, and a ready-to-send reply when relevant.\n"
+        "- For data or analysis questions, include metric definition, method, evidence needed, interpretation, and recommendation when relevant.\n"
+        "- For writing requests, produce the actual draft first, then optional notes for improvement.\n"
+        "- For coding or technical requests, provide the concrete implementation or commands first, then explain important decisions.\n"
+        "- State assumptions briefly when information is missing, then continue with the strongest useful answer.\n"
+        "- Ask at most one clarifying question, and only after giving the best possible answer from available context.\n"
+        "- Avoid vague filler, generic placeholders, repeated wording, and copy-pasted answers across turns.\n"
+        "- Use clean Markdown with short sections, bullets, tables, or numbered steps only when it improves readability.\n"
+        "- Do not always start with headings.\n"
+        "- Do not always use bullets.\n"
+        "- Use fenced code blocks for code.\n"
+        "- Use valid Markdown that renders cleanly with remark-gfm.\n"
+        "- Stay in the agent role and focus on the agent purpose."
+    )
 
 
 class ChatService:
@@ -35,7 +104,7 @@ class ChatService:
     async def list_chats(self, agent_id: str, user: UserDocument) -> list[ChatDocument]:
         self._ensure_agent_active(await self._get_owned_agent(agent_id, user))
 
-        chats = await self._chats.list_by_agent(user.id or "", agent_id)
+        chats = await self._chats.list_by_agent(user.id or "", agent_id, include_messages=False)
         for chat in chats:
             await self._ensure_chat_title(chat)
         return chats
@@ -141,11 +210,11 @@ class ChatService:
         return agent
 
     def _ensure_agent_active(self, agent: AgentDocument) -> None:
-        if agent.is_active and agent.status == "active":
+        if agent.is_active and agent.status == "enabled":
             return
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="This agent is inactive and cannot be used for chat.",
+            detail="This agent is disabled and cannot be used for chat.",
         )
 
     async def _get_owned_chat(
@@ -171,21 +240,33 @@ class ChatService:
         chat: ChatDocument,
         content: str,
     ) -> tuple[MessageDocument, MessageDocument]:
+        existing_messages = self._sorted_messages(chat.messages)
         user_message = await self._chats.add_message(
-            MessageDocument(chat_id=chat.id or "", sender_type="user", content=content),
+            MessageDocument(
+                chat_id=chat.id or "",
+                agent_id=agent.id or "",
+                user_id=chat.user_id,
+                sender_type="user",
+                role="user",
+                content=content,
+            ),
         )
 
-        messages = await self._chats.list_messages(chat.id or "")
-        assistant_content = await self._generate_assistant_response(agent, content, messages)
+        prompt_messages = [*existing_messages, user_message]
+        assistant_content = await self._generate_assistant_response(agent, content, prompt_messages)
         assistant_message = await self._chats.add_message(
             MessageDocument(
                 chat_id=chat.id or "",
+                agent_id=agent.id or "",
+                user_id=chat.user_id,
                 sender_type="assistant",
+                role="assistant",
                 content=assistant_content,
             ),
         )
 
-        title = self._build_chat_title_from_messages([*messages, assistant_message])
+        final_messages = [*prompt_messages, assistant_message]
+        title = self._build_chat_title_from_messages(final_messages)
         await self._chats.update_chat_title(chat.id or "", title)
         chat.title = title
 
@@ -198,7 +279,9 @@ class ChatService:
         message_id: str,
         content: str,
     ) -> tuple[MessageDocument, MessageDocument]:
-        message = await self._get_owned_message(chat.id or "", message_id)
+        message = self._find_message(chat.messages, message_id)
+        if message is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
         if message.sender_type != "user":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -209,20 +292,25 @@ class ChatService:
         if updated_user_message is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-        messages = await self._chats.list_messages(chat.id or "")
-        assistant_content = await self._generate_assistant_response(agent, content, messages)
-        next_assistant = await self._chats.get_next_assistant_message(
-            chat.id or "",
-            message.created_at,
-        )
+        messages = self._sorted_messages(chat.messages)
+        updated_messages = [
+            updated_user_message if item.id == updated_user_message.id else item
+            for item in messages
+        ]
+        assistant_content = await self._generate_assistant_response(agent, content, updated_messages)
+        next_assistant = self._find_next_assistant_message(updated_messages, message.created_at)
         if next_assistant is None:
             assistant_message = await self._chats.add_message(
                 MessageDocument(
                     chat_id=chat.id or "",
+                    agent_id=agent.id or "",
+                    user_id=chat.user_id,
                     sender_type="assistant",
+                    role="assistant",
                     content=assistant_content,
                 ),
             )
+            updated_messages.append(assistant_message)
         else:
             assistant_message = await self._chats.update_message_content(
                 next_assistant.id or "",
@@ -233,9 +321,12 @@ class ChatService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Message not found",
                 )
+            updated_messages = [
+                assistant_message if item.id == assistant_message.id else item
+                for item in updated_messages
+            ]
 
-        messages = await self._chats.list_messages(chat.id or "")
-        title = self._build_chat_title_from_messages(messages)
+        title = self._build_chat_title_from_messages(updated_messages)
         await self._chats.update_chat_title(chat.id or "", title)
 
         return updated_user_message, assistant_message
@@ -281,7 +372,15 @@ class ChatService:
         if chat.title:
             return
 
-        first_user_message = await self._chats.get_first_user_message(chat.id or "")
+        messages = self._sorted_messages(chat.messages)
+        if not messages and chat.id:
+            messages = await self._chats.list_messages(chat.id)
+            chat.messages = messages
+
+        first_user_message = next(
+            (message for message in messages if message.sender_type == "user"),
+            None,
+        )
         if first_user_message is None:
             return
 
@@ -299,7 +398,7 @@ class ChatService:
         history = self._message_history(messages or [], current_message=content)
         platform = AgentPlatform(
             configs=[runtime_agent],
-            tool_registry=default_tool_registry(),
+            tool_registry=_shared_tool_registry(),
             fallback=self._generate_fallback_response,
         )
         return await platform.run(content, agent_key=runtime_agent.id, history=history)
@@ -314,59 +413,22 @@ class ChatService:
             tools=agent.tools or self._infer_tool_names(agent),
             model=agent.model or agent.llm_engine or settings.default_llm_engine,
             temperature=agent.temperature,
-            is_active=agent.is_active and agent.status == "active",
+            is_active=agent.is_active and agent.status == "enabled",
         )
 
     def _build_runtime_system_prompt(self, agent: AgentDocument) -> str:
-        return (
-            f"{agent.system_prompt.strip()}\n\n"
-            "High-quality response rules:\n"
-            "- Answer the user's exact request first; do not introduce yourself or repeat the agent description.\n"
-            "- Do not force one fixed template for every answer.\n"
-            "- First understand the user's intent, then choose the best response format dynamically.\n"
-            "- Choose between plain paragraph, short bullets, numbered steps, headings with sections, table, script, code, analysis, comparison, or troubleshooting flow based on what best fits the request.\n"
-            "- For direct/simple questions, answer directly in plain text or short bullets and avoid unnecessary headings.\n"
-            "- For explanation or teaching, use sections only if helpful; otherwise use natural paragraphs.\n"
-            "- For technical guidance, architecture, roadmap, or analysis, use structured headings and bullets where useful.\n"
-            "- For rewriting, chatting, email, proposal, or message-writing tasks, produce a human, natural, ready-to-use answer; do not make it look like a report unless requested.\n"
-            "- For code/debugging, explain briefly, then provide code or concrete steps in proper code fences when useful.\n"
-            "- If the question is small, keep the answer small. If the question is deep, make the answer detailed.\n"
-            "- Use the agent's role, purpose, available tools, and conversation history to tailor the answer.\n"
-            "- Reuse the user's exact details such as product, channel, audience, numbers, goal, constraints, tone, or platform.\n"
-            "- Give specific, practical, and complete guidance so the user can act without asking the same question again.\n"
-            "- Include concrete examples, scripts, calculations, tables, templates, or ready-to-use copy when useful.\n"
-            "- For sales or marketing questions, include positioning, offer, audience, content/caption, CTA, follow-up, and improvement loop when relevant.\n"
-            "- For support or troubleshooting questions, include likely cause, diagnostic steps, fix steps, escalation rule, and a ready-to-send reply when relevant.\n"
-            "- For data or analysis questions, include metric definition, method, evidence needed, interpretation, and recommendation when relevant.\n"
-            "- For writing requests, produce the actual draft first, then optional notes for improvement.\n"
-            "- For coding or technical requests, provide the concrete implementation or commands first, then explain important decisions.\n"
-            "- State assumptions briefly when information is missing, then continue with the strongest useful answer.\n"
-            "- Ask at most one clarifying question, and only after giving the best possible answer from available context.\n"
-            "- Avoid vague filler, generic placeholders, repeated wording, and copy-pasted answers across turns.\n"
-            "- Use clean Markdown with short sections, bullets, tables, or numbered steps only when it improves readability.\n"
-            "- Do not always start with headings.\n"
-            "- Do not always use bullets.\n"
-            "- Use fenced code blocks for code.\n"
-            "- Use valid Markdown that renders cleanly with remark-gfm.\n"
-            "- Stay in the agent role and focus on the agent purpose."
-        )
+        return _runtime_system_prompt_cached(agent.system_prompt, agent.language)
 
     def _infer_tool_names(self, agent: AgentDocument) -> list[str]:
-        role_text = " ".join(
-            [
+        return list(
+            _infer_tool_names_cached(
                 agent.name,
                 agent.role,
                 agent.purpose,
                 agent.template_type or "",
                 agent.category_tag or "",
-            ]
-        ).lower()
-        tools = ["summarizer"]
-        if any(term in role_text for term in ("sales", "lead", "revenue", "marketing")):
-            tools.append("sales_playbook")
-        if any(term in role_text for term in ("data", "analytics", "report", "metric")):
-            tools.append("calculator")
-        return tools
+            )
+        )
 
     async def _generate_openai_response(
         self,
@@ -382,14 +444,13 @@ class ChatService:
                 APIConnectionError,
                 APIError,
                 APIStatusError,
-                AsyncOpenAI,
                 RateLimitError,
             )
         except ImportError as exc:
             _ = exc
             return None
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = _get_openai_client(settings.openai_api_key)
         input_messages = self._openai_input_messages(agent_config, message, history)
         try:
             response = await client.responses.create(
@@ -547,3 +608,19 @@ class ChatService:
                 continue
             history.append(f"{message.sender_type}: {message.content}")
         return history
+
+    def _sorted_messages(self, messages: list[MessageDocument]) -> list[MessageDocument]:
+        return sorted(messages, key=lambda message: message.created_at)
+
+    def _find_message(self, messages: list[MessageDocument], message_id: str) -> MessageDocument | None:
+        return next((message for message in messages if message.id == message_id), None)
+
+    def _find_next_assistant_message(
+        self,
+        messages: list[MessageDocument],
+        after_created_at,
+    ) -> MessageDocument | None:
+        for message in self._sorted_messages(messages):
+            if message.sender_type == "assistant" and message.created_at > after_created_at:
+                return message
+        return None

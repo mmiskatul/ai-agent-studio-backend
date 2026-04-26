@@ -30,6 +30,7 @@ from app.schemas.agent import (
     ToolResponse,
 )
 from app.schemas.chat import ChatResponse, ChatSendResponse, MessageCreate, MessageResponse, MessageUpdate
+from app.schemas.common import ApiResponse
 from app.tools.registry import default_tool_registry
 
 router = APIRouter()
@@ -43,31 +44,43 @@ async def list_agents(
     return await factory.agent_service.list_agents(current_user)
 
 
-@router.post("", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ApiResponse[AgentResponse], status_code=status.HTTP_201_CREATED)
 async def create_agent(
     payload: AgentCreate,
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    return await factory.agent_service.create_agent(payload, current_user)
+    agent = await factory.agent_service.create_agent(payload, current_user)
+    return ApiResponse(
+        message="Agent created successfully",
+        data=agent,
+    )
 
 
-@router.post("/builder", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/builder", response_model=ApiResponse[AgentResponse], status_code=status.HTTP_201_CREATED)
 async def create_builder_agent(
     payload: AgentBuilderCreate,
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    return await factory.agent_service.create_builder_agent(payload, current_user)
+    agent = await factory.agent_service.create_builder_agent(payload, current_user)
+    return ApiResponse(
+        message="Agent created successfully",
+        data=agent,
+    )
 
 
-@router.post("/ai", response_model=AgentResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/ai", response_model=ApiResponse[AgentResponse], status_code=status.HTTP_201_CREATED)
 async def create_ai_agent(
     payload: AgentAICreate,
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    return await factory.agent_service.create_ai_agent(payload, current_user)
+    agent = await factory.agent_service.create_ai_agent(payload, current_user)
+    return ApiResponse(
+        message="Agent created successfully",
+        data=agent,
+    )
 
 
 @router.get("/llm-engines", response_model=LLMEngineOptionsResponse)
@@ -524,24 +537,32 @@ async def get_agent(
     return await factory.agent_service.get_agent(agent_id, current_user)
 
 
-@router.patch("/{agent_id}", response_model=AgentResponse)
+@router.patch("/{agent_id}", response_model=ApiResponse[AgentResponse])
 async def update_agent(
     agent_id: str,
     payload: AgentUpdate,
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    return await factory.agent_service.update_agent(agent_id, payload, current_user)
+    agent = await factory.agent_service.update_agent(agent_id, payload, current_user)
+    return ApiResponse(
+        message="Agent updated successfully",
+        data=agent,
+    )
 
 
-@router.put("/{agent_id}", response_model=AgentResponse)
+@router.put("/{agent_id}", response_model=ApiResponse[AgentResponse])
 async def replace_agent(
     agent_id: str,
     payload: AgentUpdate,
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    return await factory.agent_service.update_agent(agent_id, payload, current_user)
+    agent = await factory.agent_service.update_agent(agent_id, payload, current_user)
+    return ApiResponse(
+        message="Agent updated successfully",
+        data=agent,
+    )
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

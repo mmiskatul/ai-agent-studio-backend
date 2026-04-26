@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 from app.tools.base import AgentTool
 from app.tools.builtin import BUILTIN_TOOLS
 
@@ -23,6 +25,7 @@ class ToolRegistry:
         return sorted(self._tools)
 
 
+@lru_cache(maxsize=1)
 def default_tool_registry() -> ToolRegistry:
     registry = ToolRegistry()
     for tool in BUILTIN_TOOLS:

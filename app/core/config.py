@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     app_name: str = "AgentHub API"
     app_env: str = "development"
     api_v1_prefix: str = "/api/v1"
+    request_timing_enabled: bool = True
+    request_slow_log_ms: int = 800
     backend_cors_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://localhost:3000"]
     )

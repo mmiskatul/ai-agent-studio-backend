@@ -25,7 +25,11 @@ def save_messages_node(*, messages: MessageRepository):
                 agent_id=agent.id,
                 role="assistant",
                 content=state["final_response"],
-                metadata={"system_summary": state.get("system_summary", "")},
+                metadata={
+                    "system_summary": state.get("system_summary", ""),
+                    "markdown": state.get("markdown_response", state.get("final_response", "")),
+                    "render_mode": state.get("response_render_mode", "plain"),
+                },
             )
         )
         recent = [*state.get("messages", []), user_message, assistant_message]

@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import timedelta
+from functools import lru_cache
 from logging import getLogger
 
 from fastapi import HTTPException, status
@@ -40,6 +41,32 @@ from app.services.agent_response_prompt import (
 from app.tools.registry import default_tool_registry
 
 logger = getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _get_openai_client(api_key: str):
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(api_key=api_key)
+
+
+@lru_cache(maxsize=512)
+def _infer_tools_cached(
+    name: str,
+    role: str,
+    purpose: str,
+    template_type: str,
+    category_tag: str,
+) -> tuple[str, ...]:
+    lowered_text = " ".join([name, role, purpose, template_type, category_tag]).lower()
+    tools = ["summarizer"]
+    if any(term in lowered_text for term in ("sales", "lead", "revenue", "marketing")):
+        tools.append("sales_playbook")
+    if any(term in lowered_text for term in ("data", "analytics", "report", "metric")):
+        tools.append("calculator")
+    if any(term in lowered_text for term in ("search", "research", "web")):
+        tools.append("search")
+    return tuple(tools)
 
 
 class AgentService:
@@ -181,7 +208,7 @@ class AgentService:
                 llm_engine=config.model,
                 model=config.model,
                 temperature=config.temperature,
-                status="active" if config.is_active else "inactive",
+                status="enabled" if config.is_active else "disabled",
                 tools=config.tools,
                 is_active=config.is_active,
             )
@@ -222,14 +249,22 @@ class AgentService:
         if not config.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="This agent is inactive and cannot generate responses.",
+                detail="This agent is disabled and cannot generate responses.",
             )
 
         chat = await self._get_or_create_memory_chat(agent, user, content, chat_id=chat_id)
+        existing_messages = self._sorted_messages(chat.messages)
         user_message = await self._chats.add_message(
-            MessageDocument(chat_id=chat.id or "", sender_type="user", content=content),
+            MessageDocument(
+                chat_id=chat.id or "",
+                agent_id=agent.id or "",
+                user_id=user.id or "",
+                sender_type="user",
+                role="user",
+                content=content,
+            ),
         )
-        messages = await self._chats.list_messages(chat.id or "")
+        messages = [*existing_messages, user_message]
         response = await self._generate_memory_response(
             agent=agent,
             config=config,
@@ -241,7 +276,10 @@ class AgentService:
         assistant_message = await self._chats.add_message(
             MessageDocument(
                 chat_id=chat.id or "",
+                agent_id=agent.id or "",
+                user_id=user.id or "",
                 sender_type="assistant",
+                role="assistant",
                 content=parsed_response.response,
             ),
         )
@@ -270,8 +308,7 @@ class AgentService:
         )
         if chat is None:
             return agent, None, []
-        messages = await self._chats.list_messages(chat.id or "")
-        return agent, chat, messages
+        return agent, chat, self._sorted_messages(chat.messages)
 
     async def list_agent_response_pages(
         self,
@@ -296,7 +333,7 @@ class AgentService:
         if not config.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="This agent is inactive and cannot create response pages.",
+                detail="This agent is disabled and cannot create response pages.",
             )
         return await self._chats.create(
             ChatDocument(
@@ -315,8 +352,7 @@ class AgentService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
 
         agent = await self._get_agent_document(chat.agent_id, user)
-        messages = await self._chats.list_messages(chat.id or "")
-        return agent, chat, messages
+        return agent, chat, self._sorted_messages(chat.messages)
 
     async def update_agent_response_message(
         self,
@@ -330,7 +366,7 @@ class AgentService:
         if not config.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="This agent is inactive and cannot generate responses.",
+                detail="This agent is disabled and cannot generate responses.",
             )
 
         chat, message = await self._get_owned_response_message(agent, user, message_id)
@@ -344,11 +380,12 @@ class AgentService:
         if updated_user_message is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
 
-        next_assistant = await self._chats.get_next_assistant_message(
-            chat.id or "",
-            message.created_at,
-        )
-        messages = await self._chats.list_messages(chat.id or "")
+        next_assistant = self._find_next_assistant_message(chat.messages, message.created_at)
+        messages = self._sorted_messages(chat.messages)
+        messages = [
+            updated_user_message if item.id == updated_user_message.id else item
+            for item in messages
+        ]
         prompt_messages = [
             item for item in messages if next_assistant is None or item.id != next_assistant.id
         ]
@@ -362,13 +399,14 @@ class AgentService:
         parsed_response = parse_agent_json_response(response)
 
         if next_assistant is None:
-            await self._chats.add_message(
+            assistant_message = await self._chats.add_message(
                 MessageDocument(
                     chat_id=chat.id or "",
                     sender_type="assistant",
                     content=parsed_response.response,
                 ),
             )
+            messages = [*messages, assistant_message]
         else:
             updated_assistant = await self._chats.update_message_content(
                 next_assistant.id or "",
@@ -379,8 +417,11 @@ class AgentService:
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Message not found",
                 )
+            messages = [
+                updated_assistant if item.id == updated_assistant.id else item
+                for item in messages
+            ]
 
-        messages = await self._chats.list_messages(chat.id or "")
         memory = self._build_chat_memory(
             previous_memory=self._parse_chat_memory(chat.memory, chat.summary),
             system_summary=parsed_response.system_summary,
@@ -403,16 +444,13 @@ class AgentService:
         if not config.is_active:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="This agent is inactive and cannot generate responses.",
+                detail="This agent is disabled and cannot generate responses.",
             )
 
         chat, message = await self._get_owned_response_message(agent, user, message_id)
         paired_assistant = None
         if message.sender_type == "user":
-            paired_assistant = await self._chats.get_next_assistant_message(
-                chat.id or "",
-                message.created_at,
-            )
+            paired_assistant = self._find_next_assistant_message(chat.messages, message.created_at)
 
         deleted = await self._chats.delete_message(message.id or "")
         if not deleted:
@@ -421,7 +459,11 @@ class AgentService:
         if paired_assistant is not None:
             await self._chats.delete_message(paired_assistant.id or "")
 
-        messages = await self._chats.list_messages(chat.id or "")
+        messages = [
+            item
+            for item in self._sorted_messages(chat.messages)
+            if item.id != message.id and (paired_assistant is None or item.id != paired_assistant.id)
+        ]
         memory = self._build_chat_memory(
             previous_memory=self._parse_chat_memory(chat.memory, chat.summary),
             system_summary="Deleted a message and rebuilt memory from remaining chat history.",
@@ -470,11 +512,11 @@ class AgentService:
         user: UserDocument,
         message_id: str,
     ) -> tuple[ChatDocument, MessageDocument]:
-        message = await self._chats.get_message(message_id)
-        if message is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
-        chat = await self._chats.get_owned_chat(user.id or "", agent.id or "", message.chat_id)
+        chat = await self._chats.get_owned_chat_by_message(user.id or "", agent.id or "", message_id)
         if chat is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+        message = next((item for item in chat.messages if item.id == message_id), None)
+        if message is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
         return chat, message
 
@@ -487,6 +529,19 @@ class AgentService:
         if message is None or message.chat_id != (chat.id or ""):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
         return message
+
+    def _sorted_messages(self, messages: list[MessageDocument]) -> list[MessageDocument]:
+        return sorted(messages, key=lambda message: message.created_at)
+
+    def _find_next_assistant_message(
+        self,
+        messages: list[MessageDocument],
+        after_created_at,
+    ) -> MessageDocument | None:
+        for message in self._sorted_messages(messages):
+            if message.sender_type == "assistant" and message.created_at > after_created_at:
+                return message
+        return None
 
     def _build_title(self, content: str) -> str:
         title = " ".join(content.strip().split())
@@ -650,7 +705,6 @@ class AgentService:
                 APIConnectionError,
                 APIError,
                 APIStatusError,
-                AsyncOpenAI,
                 RateLimitError,
             )
         except ImportError:
@@ -660,7 +714,7 @@ class AgentService:
                 self._memory_context_text(memory),
             )
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = _get_openai_client(settings.openai_api_key)
         try:
             response = await client.responses.create(
                 model=config.model or settings.default_llm_engine,
@@ -921,41 +975,47 @@ class AgentService:
         payload: AgentBuilderCreate,
         user: UserDocument,
     ) -> AgentResponse:
+        normalized_status = self._normalize_status(payload.status)
         agent = AgentDocument(
             user_id=user.id or "",
             name=payload.name,
             role=payload.category_tag or payload.base_template or "AgentLab",
             purpose=payload.short_description,
             description=payload.short_description,
+            language=self._normalize_language(payload.language),
             template_type=payload.base_template,
+            template_id=payload.template_id,
             category_tag=payload.category_tag,
             system_prompt=payload.system_prompt,
             welcome_message=payload.welcome_message,
             llm_engine=payload.llm_engine,
             model=payload.llm_engine,
             temperature=payload.temperature,
-            status=payload.status,
+            status=normalized_status,
             tools=self._infer_tools(payload.category_tag or payload.base_template),
-            is_active=payload.status == "active",
+            is_active=normalized_status == "enabled",
         )
         return self._agent_response(await self._agents.create(agent))
 
     async def create_ai_agent(self, payload: AgentAICreate, user: UserDocument) -> AgentResponse:
         system_prompt = await self._generate_system_prompt(payload)
+        normalized_status = self._normalize_status(payload.status)
         agent = AgentDocument(
             user_id=user.id or "",
             name=payload.name,
             role=payload.role or "AI Agent",
             purpose=payload.purpose,
             description=payload.purpose,
+            language=self._normalize_language(payload.language),
             template_type=payload.template_type,
+            template_id=payload.template_id,
             category_tag=payload.template_type,
             system_prompt=system_prompt,
             llm_engine=settings.default_llm_engine,
             model=settings.default_llm_engine,
-            status=payload.status,
+            status=normalized_status,
             tools=self._infer_tools(payload.role or payload.template_type),
-            is_active=payload.status == "active",
+            is_active=normalized_status == "enabled",
         )
         return self._agent_response(await self._agents.create(agent))
 
@@ -1007,18 +1067,22 @@ class AgentService:
             return {}
 
     def _agent_response(self, agent: AgentDocument, queries_30d: int = 0) -> AgentResponse:
+        normalized_status = self._normalize_status(agent.status)
         return AgentResponse.model_validate(
             {
                 **agent.model_dump(),
                 "id": agent.id or "",
+                "status": normalized_status,
                 "description": agent.description or agent.purpose,
                 "model": agent.model or agent.llm_engine,
-                "is_active": agent.is_active and agent.status == "active",
+                "owner_user_id": agent.user_id,
+                "is_active": agent.is_active and normalized_status == "enabled",
                 "queries_30d": queries_30d,
             },
         )
 
     def _agent_config(self, agent: AgentDocument) -> AgentConfig:
+        normalized_status = self._normalize_status(agent.status)
         return AgentConfig(
             id=agent.id or agent.name,
             name=agent.name,
@@ -1038,13 +1102,15 @@ class AgentService:
             ),
             model=agent.model or agent.llm_engine or settings.default_llm_engine,
             temperature=agent.temperature,
-            is_active=agent.is_active and agent.status == "active",
+            is_active=agent.is_active and normalized_status == "enabled",
         )
 
     def _normalize_agent_config(self, data: dict) -> dict:
         data["description"] = data.get("description") or data.get("purpose") or data.get("role")
         data["model"] = data.get("model") or data.get("llm_engine") or settings.default_llm_engine
         data["llm_engine"] = data.get("llm_engine") or data["model"]
+        data["status"] = self._normalize_status(data.get("status"))
+        data["language"] = self._normalize_language(data.get("language"))
         data["tools"] = data.get("tools") or self._infer_tools(
             " ".join(
                 str(value)
@@ -1057,27 +1123,41 @@ class AgentService:
                 )
             ),
         )
-        data["is_active"] = data.get("status", "active") == "active" and data.get(
+        data["is_active"] = data.get("status", "enabled") == "enabled" and data.get(
             "is_active",
             True,
         )
         return data
 
+    def _normalize_status(self, value: object) -> str:
+        normalized = str(value or "enabled").strip().lower()
+        if normalized in {"enabled", "active"}:
+            return "enabled"
+        if normalized in {"disabled", "inactive"}:
+            return "disabled"
+        return "enabled"
+
+    def _normalize_language(self, value: object) -> str:
+        normalized = str(value or "EN").strip().upper()
+        return normalized if normalized in {"EN", "DE", "RU"} else "EN"
+
     def _infer_tools(self, text: str | None) -> list[str]:
-        lowered_text = (text or "").lower()
-        tools = ["summarizer"]
-        if any(term in lowered_text for term in ("sales", "lead", "revenue", "marketing")):
-            tools.append("sales_playbook")
-        if any(term in lowered_text for term in ("data", "analytics", "report", "metric")):
-            tools.append("calculator")
-        if any(term in lowered_text for term in ("search", "research", "web")):
-            tools.append("search")
-        return tools
+        normalized_text = text or ""
+        return list(
+            _infer_tools_cached(
+                normalized_text,
+                "",
+                "",
+                "",
+                "",
+            )
+        )
 
     async def generate_short_description(self, payload: AgentDescriptionGenerateRequest) -> str:
         input_text = (
             "Write a useful 3-4 sentence description for an AI agent.\n"
-            f"Agent name: {payload.name}\n\n"
+            f"Agent name: {payload.name}\n"
+            f"Agent role: {payload.role or 'Not provided'}\n\n"
             "Requirements:\n"
             "- Write 3 to 4 complete sentences.\n"
             "- Explain what the agent does, who it helps, and what kind of outputs it produces.\n"
@@ -1088,7 +1168,7 @@ class AgentService:
         )
         return await self._generate_text(
             input_text,
-            fallback=self._fallback_short_description(payload.name),
+            fallback=self._fallback_short_description(payload.name, payload.role),
         )
 
     async def generate_builder_system_prompt(
@@ -1218,12 +1298,12 @@ class AgentService:
             return fallback
 
         try:
-            from openai import AsyncOpenAI
+            _get_openai_client(settings.openai_api_key)
         except ImportError:
             logger.exception("OpenAI SDK is unavailable; using fallback generated text.")
             return fallback
 
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
+        client = _get_openai_client(settings.openai_api_key)
         try:
             response = await client.responses.create(
                 model=settings.default_llm_engine,
@@ -1239,9 +1319,10 @@ class AgentService:
 
         return fallback
 
-    def _fallback_short_description(self, name: str) -> str:
+    def _fallback_short_description(self, name: str, role: str | None = None) -> str:
         cleaned_name = name.strip()
         lower_name = cleaned_name.lower()
+        cleaned_role = (role or "").strip()
 
         if any(term in lower_name for term in ("sales", "lead", "outreach", "revenue")):
             return (
@@ -1289,6 +1370,14 @@ class AgentService:
                 "positioning, CTAs, and improvement ideas based on the user's channel and product. "
                 "The agent is useful for producing practical marketing output instead of vague "
                 "campaign advice."
+            )
+        if cleaned_role:
+            return (
+                f"{cleaned_name} works as a {cleaned_role} and helps users complete related tasks "
+                "with clear guidance and ready-to-use outputs. It can answer questions, organize "
+                "information, draft responses, and suggest practical next steps based on the user's "
+                "goal. The agent is designed to make day-to-day work faster, more consistent, and "
+                "easier to act on."
             )
 
         return (
@@ -1401,7 +1490,10 @@ class AgentService:
         if "model" in data and "llm_engine" not in data:
             data["llm_engine"] = data["model"]
         if "status" in data:
-            data["is_active"] = data["status"] == "active" and data.get("is_active", True)
+            data["status"] = self._normalize_status(data["status"])
+            data["is_active"] = data["status"] == "enabled" and data.get("is_active", True)
+        if "language" in data:
+            data["language"] = self._normalize_language(data["language"])
         return data
 
     async def delete_agent(self, agent_id: str, user: UserDocument) -> None:

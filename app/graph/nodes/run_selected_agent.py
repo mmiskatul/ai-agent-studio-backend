@@ -28,7 +28,7 @@ def run_selected_agent_node(*, chats: ChatRepository, llm_service: LLMService):
             if updated_chat is not None:
                 chat = updated_chat
 
-        final_response = await llm_service.generate_agent_response(
+        structured_response = await llm_service.generate_agent_response(
             agent=agent,
             user_message=state["user_message"],
             memory_summary=state.get("memory_summary", ""),
@@ -39,11 +39,10 @@ def run_selected_agent_node(*, chats: ChatRepository, llm_service: LLMService):
             **state,
             "chat": chat,
             "chat_id": chat.id or "",
-            "final_response": final_response,
-            "system_summary": (
-                f"{agent.name} handled the request using session context and "
-                "available memory."
-            ),
+            "final_response": structured_response.response,
+            "markdown_response": structured_response.markdown,
+            "response_render_mode": structured_response.render_mode,
+            "system_summary": structured_response.system_summary,
         }
 
     return node
