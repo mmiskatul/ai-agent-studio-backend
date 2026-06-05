@@ -144,6 +144,7 @@ class AgentResponsePageCreateRequest(BaseModel):
 class AgentResponsePage(BaseModel):
     id: str
     agent_id: str
+    agent_name: str | None = None
     title: str | None = None
     memory_summary: MemorySummary
     message_count: int

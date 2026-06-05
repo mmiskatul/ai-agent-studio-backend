@@ -170,6 +170,27 @@ async def generate_agent_welcome_message(
     return AgentWelcomeMessageGenerateResponse(welcome_message=welcome_message)
 
 
+@router.get("/response/pages", response_model=list[AgentResponsePage])
+async def list_all_agent_response_pages(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    pages = await factory.agent_service.list_all_agent_response_pages(current_user)
+    return [
+        AgentResponsePage(
+            id=chat.id or "",
+            agent_id=chat.agent_id,
+            agent_name=chat.agent_name,
+            title=chat.title,
+            memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
+            message_count=message_count,
+            created_at=chat.created_at,
+            updated_at=chat.updated_at,
+        )
+        for chat, message_count in pages
+    ]
+
+
 @router.post("/{agent_id}/response", response_model=AgentResponseGenerateResponse)
 async def generate_agent_response(
     agent_id: str,
@@ -234,6 +255,7 @@ async def list_agent_response_pages(
         AgentResponsePage(
             id=chat.id or "",
             agent_id=chat.agent_id,
+            agent_name=chat.agent_name,
             title=chat.title,
             memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
             message_count=message_count,
@@ -263,6 +285,7 @@ async def create_agent_response_page(
     return AgentResponsePage(
         id=chat.id or "",
         agent_id=chat.agent_id,
+        agent_name=chat.agent_name,
         title=chat.title,
         memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
         message_count=0,

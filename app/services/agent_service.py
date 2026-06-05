@@ -322,6 +322,23 @@ class AgentService:
         )
         return [(chat, message_counts.get(chat.id or "", 0)) for chat in chats]
 
+    async def list_all_agent_response_pages(
+        self,
+        user: UserDocument,
+    ) -> list[tuple[ChatDocument, int]]:
+        chats = await self._chats.list_by_user(user.id or "", include_messages=False)
+        message_counts = await self._chats.count_messages_by_chat_ids(
+            [chat.id or "" for chat in chats if chat.id],
+        )
+        agents = await self._agents.list_by_user(user.id or "")
+        agent_names = {agent.id or "": agent.name for agent in agents if agent.id}
+
+        for chat in chats:
+            if not chat.agent_name:
+                chat.agent_name = agent_names.get(chat.agent_id)
+
+        return [(chat, message_counts.get(chat.id or "", 0)) for chat in chats]
+
     async def create_agent_response_page(
         self,
         agent_id: str,
