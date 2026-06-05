@@ -18,6 +18,7 @@ from app.schemas.agent import (
     AgentResponseGenerateRequest,
     AgentResponseGenerateResponse,
     AgentResponseMessage,
+    AgentResponseWorkspaceResponse,
     AgentRouteRequest,
     AgentRouteResponse,
     AgentResponse,
@@ -220,7 +221,7 @@ async def get_agent_response_history(
     current_user: UserDocument = Depends(get_current_user),
     factory: ServiceFactory = Depends(get_service_factory),
 ):
-    agent, chat, messages = await factory.agent_service.get_agent_response_history(
+    agent, chat, messages, total_message_count = await factory.agent_service.get_agent_response_history(
         agent_id,
         current_user,
         chat_id=chat_id,
@@ -232,6 +233,8 @@ async def get_agent_response_history(
         memory_summary=factory.agent_service.parse_memory_summary(
             chat.memory if chat else None
         ),
+        total_message_count=total_message_count,
+        has_more_messages=total_message_count > len(messages),
         messages=[
             AgentResponseMessage.model_validate(
                 {
@@ -240,6 +243,51 @@ async def get_agent_response_history(
                 },
             )
             for message in messages
+        ],
+    )
+
+
+@router.get("/{agent_id}/response/workspace", response_model=AgentResponseWorkspaceResponse)
+async def get_agent_response_workspace(
+    agent_id: str,
+    chat_id: str | None = None,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    agent, pages, chat, messages, total_message_count = await factory.agent_service.get_agent_response_workspace(
+        agent_id,
+        current_user,
+        chat_id=chat_id,
+    )
+    return AgentResponseWorkspaceResponse(
+        agent=agent,
+        chat_id=chat.id if chat else None,
+        memory_summary=factory.agent_service.parse_memory_summary(chat.memory if chat else None),
+        total_message_count=total_message_count,
+        has_more_messages=total_message_count > len(messages),
+        messages=[
+            AgentResponseMessage.model_validate(
+                {
+                    **message.model_dump(),
+                    "id": message.id or "",
+                },
+            )
+            for message in messages
+        ],
+        pages=[
+            AgentResponsePage(
+                id=page_chat.id or "",
+                agent_id=page_chat.agent_id,
+                agent_name=page_chat.agent_name,
+                title=page_chat.title,
+                memory_summary=factory.agent_service.parse_memory_summary(
+                    page_chat.memory or page_chat.summary
+                ),
+                message_count=message_count,
+                created_at=page_chat.created_at,
+                updated_at=page_chat.updated_at,
+            )
+            for page_chat, message_count in pages
         ],
     )
 

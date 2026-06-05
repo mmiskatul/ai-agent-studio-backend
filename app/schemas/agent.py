@@ -135,6 +135,8 @@ class AgentResponseHistoryResponse(BaseModel):
     chat_id: str | None = None
     memory_summary: MemorySummary
     messages: list[AgentResponseMessage]
+    total_message_count: int = 0
+    has_more_messages: bool = False
 
 
 class AgentResponsePageCreateRequest(BaseModel):
@@ -150,6 +152,16 @@ class AgentResponsePage(BaseModel):
     message_count: int
     created_at: datetime
     updated_at: datetime
+
+
+class AgentResponseWorkspaceResponse(BaseModel):
+    agent: "AgentResponse"
+    chat_id: str | None = None
+    memory_summary: MemorySummary
+    messages: list[AgentResponseMessage]
+    total_message_count: int = 0
+    has_more_messages: bool = False
+    pages: list[AgentResponsePage]
 
 
 class AgentRegistryRebuildResponse(BaseModel):
@@ -217,3 +229,6 @@ class AgentResponse(AgentBase):
     queries_30d: int = 0
     created_at: datetime
     updated_at: datetime
+
+
+AgentResponseWorkspaceResponse.model_rebuild()

@@ -344,7 +344,7 @@ class ChatRepository:
         )
         return counts
 
-    async def list_messages(self, chat_id: str) -> list[MessageDocument]:
+    async def list_messages(self, chat_id: str, *, limit: int | None = None) -> list[MessageDocument]:
         filters = {"_id": chat_id}
         started_at = start_mongo_timer()
         data = await self.collection.find_one(filters, {"messages": 1})
@@ -360,10 +360,13 @@ class ChatRepository:
             MessageDocument.model_validate(message)
             for message in data.get("messages", [])
         ]
-        return sorted(
+        sorted_messages = sorted(
             messages,
             key=lambda message: self._normalize_datetime(message.created_at),
         )
+        if limit is not None and limit > 0:
+            return sorted_messages[-limit:]
+        return sorted_messages
 
     async def add_message(self, message: MessageDocument) -> MessageDocument:
         created_message = message.model_copy(
