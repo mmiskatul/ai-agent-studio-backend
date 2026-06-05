@@ -48,8 +48,9 @@ def _runtime_system_prompt_cached(system_prompt: str, language: str) -> str:
     return (
         f"{system_prompt.strip()}\n\n"
         f"Language rules:\n"
-        f"- Default response language is {language}.\n"
-        "- Keep the full response in that language unless the user clearly requests another one.\n\n"
+        "- Match the language of the user's latest message by default.\n"
+        f"- Use {language} only as the fallback language when the user's language is unclear.\n"
+        "- Keep the full response in one language unless the user clearly requests another behavior.\n\n"
         "High-quality response rules:\n"
         "- Answer the user's exact request first; do not introduce yourself or repeat the agent description.\n"
         "- Do not force one fixed template for every answer.\n"
