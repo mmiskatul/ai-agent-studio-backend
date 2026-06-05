@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 
 from app.core.config import settings
 from app.dependencies import get_current_user, get_service_factory
@@ -11,6 +11,7 @@ from app.schemas.agent import (
     AgentCreate,
     AgentDescriptionGenerateRequest,
     AgentDescriptionGenerateResponse,
+    AgentKnowledgeUploadResponse,
     AgentRegistryRebuildResponse,
     AgentResponsePage,
     AgentResponsePageCreateRequest,
@@ -35,6 +36,8 @@ from app.schemas.common import ApiResponse
 from app.tools.registry import default_tool_registry
 
 router = APIRouter()
+
+ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json"}
 
 
 @router.get("", response_model=list[AgentResponse])
@@ -171,6 +174,42 @@ async def generate_agent_welcome_message(
     return AgentWelcomeMessageGenerateResponse(welcome_message=welcome_message)
 
 
+@router.post("/knowledge/extract", response_model=AgentKnowledgeUploadResponse)
+async def extract_agent_knowledge(
+    file: UploadFile = File(...),
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    _ = current_user
+    suffix = ""
+    if file.filename and "." in file.filename:
+        suffix = "." + file.filename.rsplit(".", 1)[-1].lower()
+    if suffix not in ALLOWED_KNOWLEDGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported file type. Use PDF, TXT, MD, CSV, or JSON.",
+        )
+
+    content = await file.read()
+    extracted_text = factory.agent_service.extract_knowledge_text(
+        file_name=file.filename or "upload.txt",
+        content_type=file.content_type,
+        content=content,
+    )
+    if not extracted_text:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not extract any readable text from the uploaded file.",
+        )
+
+    return AgentKnowledgeUploadResponse(
+        file_name=file.filename or "upload.txt",
+        content_type=file.content_type or "application/octet-stream",
+        extracted_text=extracted_text,
+        character_count=len(extracted_text),
+    )
+
+
 @router.get("/response/pages", response_model=list[AgentResponsePage])
 async def list_all_agent_response_pages(
     current_user: UserDocument = Depends(get_current_user),
@@ -204,6 +243,8 @@ async def generate_agent_response(
         current_user,
         payload.content,
         chat_id=payload.chat_id,
+        attachment_text=payload.attachment_text,
+        attachment_name=payload.attachment_name,
     )
     return AgentResponseGenerateResponse(
         agent_id=agent.id or "",

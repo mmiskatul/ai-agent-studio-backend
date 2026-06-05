@@ -25,6 +25,8 @@ class AgentResponsePromptBuilder:
         memory: ChatMemoryDocument,
         current_message: str,
         messages: list[MessageDocument],
+        attachment_text: str | None = None,
+        attachment_name: str | None = None,
     ) -> str:
         recent_messages = [
             f"{message.sender_type}: {message.content}"
@@ -41,6 +43,8 @@ class AgentResponsePromptBuilder:
             f"Agent Role: {agent.role}\n"
             f"Project Description: {agent.description or agent.purpose}\n"
             f"Configured Fallback Language: {agent.language}\n\n"
+            "Uploaded Knowledge Base:\n"
+            f"{(agent.knowledge_text or 'None').strip()[:6000] or 'None'}\n\n"
             "Base System Instructions:\n"
             f"{config.system_prompt}\n\n"
             "========================\n"
@@ -48,6 +52,8 @@ class AgentResponsePromptBuilder:
             "========================\n"
             "User Message:\n"
             f"{current_message.strip()}\n\n"
+            "Current Turn Attachment:\n"
+            f"{self.format_attachment(attachment_text, attachment_name)}\n\n"
             "Recent Conversation (PRIMARY CONTEXT):\n"
             f"{self.format_recent_messages(recent_messages)}\n\n"
             "Structured Memory (SECONDARY CONTEXT):\n"
@@ -62,6 +68,8 @@ class AgentResponsePromptBuilder:
             "- You MUST answer in the same language as the user's latest message unless the user explicitly asks you to use another language.\n"
             "- Use the agent's configured fallback language only when the user's latest message language is unclear.\n"
             "- You MUST use memory ONLY if it is relevant to the current user message.\n"
+            "- You SHOULD use the uploaded knowledge base when it is relevant to the user's request.\n"
+            "- You SHOULD use the current-turn attachment text when it is relevant to the user's request.\n"
             "- You MUST prioritize the latest user message over older context.\n"
             "- You MUST keep consistency with previous conversation.\n"
             "- You MUST NOT hallucinate missing data.\n"
@@ -225,6 +233,14 @@ class AgentResponsePromptBuilder:
         if memory.open_loops:
             memory_items.append("Open Loops:\n- " + "\n- ".join(memory.open_loops))
         return "\n\n".join(memory_items) if memory_items else "No structured memory yet."
+
+    def format_attachment(self, attachment_text: str | None, attachment_name: str | None) -> str:
+        normalized_text = (attachment_text or "").strip()
+        if not normalized_text:
+            return "No attachment provided for this turn."
+        label = attachment_name.strip() if isinstance(attachment_name, str) and attachment_name.strip() else "attachment"
+        truncated = normalized_text[:12000].rstrip()
+        return f"Attachment Name: {label}\nAttachment Text:\n{truncated}"
 
     def infer_result_style(self, message: str) -> str:
         lowered_message = message.lower()

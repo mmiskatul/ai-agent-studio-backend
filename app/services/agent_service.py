@@ -3,6 +3,7 @@ import re
 from datetime import timedelta
 from functools import lru_cache
 from logging import getLogger
+from pathlib import Path
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
@@ -42,6 +43,7 @@ from app.tools.registry import default_tool_registry
 
 logger = getLogger(__name__)
 MESSAGE_WINDOW_SIZE = 100
+MAX_AGENT_KNOWLEDGE_CHARS = 30000
 
 
 @lru_cache(maxsize=1)
@@ -244,6 +246,8 @@ class AgentService:
         user: UserDocument,
         content: str,
         chat_id: str | None = None,
+        attachment_text: str | None = None,
+        attachment_name: str | None = None,
     ) -> tuple[AgentDocument, ChatDocument, str, ChatMemoryDocument]:
         agent = await self._get_agent_document(agent_id, user)
         config = self._agent_config(agent)
@@ -253,7 +257,8 @@ class AgentService:
                 detail="This agent is disabled and cannot generate responses.",
             )
 
-        chat = await self._get_or_create_memory_chat(agent, user, content, chat_id=chat_id)
+        prepared_content = self._prepare_user_message_content(content, attachment_name)
+        chat = await self._get_or_create_memory_chat(agent, user, prepared_content, chat_id=chat_id)
         existing_messages = self._sorted_messages(chat.messages)
         user_message = await self._chats.add_message(
             MessageDocument(
@@ -262,7 +267,7 @@ class AgentService:
                 user_id=user.id or "",
                 sender_type="user",
                 role="user",
-                content=content,
+                content=prepared_content,
             ),
         )
         messages = [*existing_messages, user_message]
@@ -272,6 +277,8 @@ class AgentService:
             chat=chat,
             current_message=user_message,
             messages=messages,
+            attachment_text=attachment_text,
+            attachment_name=attachment_name,
         )
         parsed_response = parse_agent_json_response(response)
         assistant_message = await self._chats.add_message(
@@ -738,6 +745,8 @@ class AgentService:
         chat: ChatDocument,
         current_message: MessageDocument,
         messages: list[MessageDocument],
+        attachment_text: str | None = None,
+        attachment_name: str | None = None,
     ) -> str:
         memory = self._parse_chat_memory(chat.memory, chat.summary)
         prompt = self._response_prompt_builder.build(
@@ -746,6 +755,8 @@ class AgentService:
             memory=memory,
             current_message=current_message.content,
             messages=messages,
+            attachment_text=attachment_text,
+            attachment_name=attachment_name,
         )
         if not settings.openai_api_key:
             return self._fallback_agent_response(
@@ -791,6 +802,19 @@ class AgentService:
             current_message.content,
             self._memory_context_text(memory),
         )
+
+    def _prepare_user_message_content(self, content: str, attachment_name: str | None = None) -> str:
+        normalized_content = content.strip()
+        normalized_attachment_name = (
+            attachment_name.strip() if isinstance(attachment_name, str) and attachment_name.strip() else ""
+        )
+        if normalized_content and normalized_attachment_name:
+            return f"{normalized_content}\n\n[Attached file: {normalized_attachment_name}]"
+        if normalized_content:
+            return normalized_content
+        if normalized_attachment_name:
+            return f"[Attached file: {normalized_attachment_name}]"
+        return "Please review the attached file."
 
     def _build_chat_memory(
         self,
@@ -1161,6 +1185,8 @@ class AgentService:
 
     def _normalize_agent_config(self, data: dict) -> dict:
         data["description"] = data.get("description") or data.get("purpose") or data.get("role")
+        if "knowledge_text" in data and isinstance(data["knowledge_text"], str):
+            data["knowledge_text"] = self._normalize_knowledge_text(data["knowledge_text"])
         data["model"] = data.get("model") or data.get("llm_engine") or settings.default_llm_engine
         data["llm_engine"] = data.get("llm_engine") or data["model"]
         data["status"] = self._normalize_status(data.get("status"))
@@ -1548,7 +1574,42 @@ class AgentService:
             data["is_active"] = data["status"] == "enabled" and data.get("is_active", True)
         if "language" in data:
             data["language"] = self._normalize_language(data["language"])
+        if "knowledge_text" in data and isinstance(data["knowledge_text"], str):
+            data["knowledge_text"] = self._normalize_knowledge_text(data["knowledge_text"])
         return data
+
+    def _normalize_knowledge_text(self, text: str) -> str:
+        normalized = re.sub(r"\r\n?", "\n", text).strip()
+        if len(normalized) <= MAX_AGENT_KNOWLEDGE_CHARS:
+            return normalized
+        return normalized[:MAX_AGENT_KNOWLEDGE_CHARS].rstrip()
+
+    def extract_knowledge_text(
+        self,
+        *,
+        file_name: str,
+        content_type: str | None,
+        content: bytes,
+    ) -> str:
+        suffix = Path(file_name).suffix.lower()
+        normalized_content_type = (content_type or "").lower()
+
+        if suffix == ".pdf" or normalized_content_type == "application/pdf":
+            from pypdf import PdfReader
+
+            from io import BytesIO
+
+            reader = PdfReader(BytesIO(content))
+            extracted_pages = [page.extract_text() or "" for page in reader.pages]
+            text = "\n\n".join(part.strip() for part in extracted_pages if part.strip())
+            return self._normalize_knowledge_text(text)
+
+        try:
+            decoded = content.decode("utf-8")
+        except UnicodeDecodeError:
+            decoded = content.decode("latin-1", errors="ignore")
+
+        return self._normalize_knowledge_text(decoded)
 
     async def delete_agent(self, agent_id: str, user: UserDocument) -> None:
         deleted = await self._agents.delete_owned(agent_id, user.id or "")

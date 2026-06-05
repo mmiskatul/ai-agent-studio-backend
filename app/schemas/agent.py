@@ -2,7 +2,7 @@ from datetime import datetime
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 AgentLanguage = Literal["EN", "DE", "RU"]
@@ -17,6 +17,7 @@ class AgentBase(BaseModel):
     role: str = Field(min_length=1)
     purpose: str = Field(default="")
     description: str | None = None
+    knowledge_text: str | None = None
     language: AgentLanguage = "EN"
     template_type: str | None = None
     template_id: str | None = None
@@ -103,8 +104,16 @@ class AgentRouteResponse(BaseModel):
 
 
 class AgentResponseGenerateRequest(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = ""
     chat_id: str | None = None
+    attachment_text: str | None = None
+    attachment_name: str | None = None
+
+    @model_validator(mode="after")
+    def validate_has_content(self):
+        if self.content.strip() or (self.attachment_text or "").strip():
+            return self
+        raise ValueError("Either content or attachment_text is required")
 
 
 class MemorySummary(BaseModel):
@@ -152,6 +161,13 @@ class AgentResponsePage(BaseModel):
     message_count: int
     created_at: datetime
     updated_at: datetime
+
+
+class AgentKnowledgeUploadResponse(BaseModel):
+    file_name: str
+    content_type: str
+    extracted_text: str
+    character_count: int
 
 
 class AgentResponseWorkspaceResponse(BaseModel):
