@@ -6,7 +6,7 @@ DEFAULT_AGENT_CONFIGS = [
         id="sales-support",
         name="Sales Support Agent",
         role="Sales Support Agent",
-        description="Qualifies leads, answers product questions, and guides sales next steps.",
+        description="Answers product questions, supports outreach, and guides sales next steps.",
         system_prompt=(
             "You are a senior sales support agent. Help users turn their product, service, "
             "or offer into a clear sales plan. Use the exact product, channel, audience, "

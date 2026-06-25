@@ -6,9 +6,7 @@ from app.models.base import now_utc
 from app.models.user import UserDocument
 from app.repositories.agent_repository import AgentRepository
 from app.repositories.chat_repository import ChatRepository
-from app.repositories.lead_repository import LeadRepository
 from app.repositories.message_repository import MessageRepository
-from app.repositories.staff_repository import StaffRepository
 from app.schemas.overview import (
     OverviewActivityItem,
     OverviewAgentSummary,
@@ -30,26 +28,16 @@ class OverviewService:
         agents: AgentRepository,
         chats: ChatRepository,
         messages: MessageRepository | None = None,
-        leads: LeadRepository | None = None,
-        staff: StaffRepository | None = None,
     ) -> None:
         self._agents = agents
         self._chats = chats
         self._messages = messages
-        self._leads = leads
-        self._staff = staff
 
     async def get_overview(self, user: UserDocument) -> OverviewResponse:
         user_id = user.id or ""
-        agent_summaries, chats, total_leads, total_staff = await asyncio.gather(
+        agent_summaries, chats = await asyncio.gather(
             self._agents.list_summaries_by_user(user_id),
             self._chats.list_by_user(user_id, include_messages=False),
-            self._leads.count_by_user(user_id)
-            if self._leads is not None
-            else asyncio.sleep(0, result=0),
-            self._staff.count_by_user(user_id)
-            if self._staff is not None
-            else asyncio.sleep(0, result=0),
         )
         agents = [self._normalize_agent_summary(item) for item in agent_summaries]
         chat_ids = [chat.id or "" for chat in chats if chat.id]
@@ -120,8 +108,6 @@ class OverviewService:
                 total_messages=sum(message_counts_by_chat.values()) + standalone_message_count,
                 queries_30d=sum(query_counts_by_chat.values())
                 + sum(standalone_query_counts_by_agent.values()),
-                total_leads=total_leads,
-                total_staff=total_staff,
             ),
             top_agents=[
                 OverviewAgentSummary(
