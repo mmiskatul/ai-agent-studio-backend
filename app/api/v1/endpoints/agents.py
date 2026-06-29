@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFil
 from app.core.config import settings
 from app.dependencies import get_current_user, get_service_factory
 from app.factories.service_factory import ServiceFactory
+from app.models.base import now_utc
 from app.models.user import UserDocument
 from app.schemas.agent import (
     AgentAICreate,
@@ -215,19 +216,21 @@ async def list_all_agent_response_pages(
     factory: ServiceFactory = Depends(get_service_factory),
 ):
     pages = await factory.agent_service.list_all_agent_response_pages(current_user)
-    return [
-        AgentResponsePage(
-            id=chat.id or "",
-            agent_id=chat.agent_id,
-            agent_name=chat.agent_name,
-            title=chat.title,
-            memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
-            message_count=message_count,
-            created_at=chat.created_at,
-            updated_at=chat.updated_at,
+    response_pages: list[AgentResponsePage] = []
+    for chat, message_count in pages:
+        response_pages.append(
+            AgentResponsePage(
+                id=chat.id or "",
+                agent_id=chat.agent_id or "",
+                agent_name=chat.agent_name or "Agent",
+                title=chat.title,
+                memory_summary=factory.agent_service.parse_memory_summary(chat.memory or chat.summary),
+                message_count=message_count,
+                created_at=chat.created_at or now_utc(),
+                updated_at=chat.updated_at or chat.created_at or now_utc(),
+            )
         )
-        for chat, message_count in pages
-    ]
+    return response_pages
 
 
 @router.post("/{agent_id}/response", response_model=AgentResponseGenerateResponse)
