@@ -63,6 +63,13 @@ def create_app() -> FastAPI:
     configure_logging()
     app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
+    @app.get("/")
+    async def root():
+        return {
+            "status": "success",
+            "message": "API is running",
+        }
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.resolved_backend_cors_origins,
