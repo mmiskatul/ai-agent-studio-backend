@@ -170,16 +170,6 @@ class AgentKnowledgeUploadResponse(BaseModel):
     character_count: int
 
 
-class AgentResponseWorkspaceResponse(BaseModel):
-    agent: "AgentResponse"
-    chat_id: str | None = None
-    memory_summary: MemorySummary
-    messages: list[AgentResponseMessage]
-    total_message_count: int = 0
-    has_more_messages: bool = False
-    pages: list[AgentResponsePage]
-
-
 class AgentRegistryRebuildResponse(BaseModel):
     total_agents: int
     active_agents: int
@@ -246,5 +236,3 @@ class AgentResponse(AgentBase):
     created_at: datetime
     updated_at: datetime
 
-
-AgentResponseWorkspaceResponse.model_rebuild()

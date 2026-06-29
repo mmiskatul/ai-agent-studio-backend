@@ -320,40 +320,6 @@ class AgentService:
         messages = await self._chats.list_messages(chat.id or "", limit=MESSAGE_WINDOW_SIZE)
         return agent, chat, messages, total_count
 
-    async def get_agent_response_workspace(
-        self,
-        agent_id: str,
-        user: UserDocument,
-        chat_id: str | None = None,
-    ) -> tuple[AgentResponse, list[tuple[ChatDocument, int]], ChatDocument | None, list[MessageDocument], int]:
-        agent = await self._get_agent_document(agent_id, user)
-        chats = await self._chats.list_by_agent(user.id or "", agent.id or "", include_messages=False)
-        message_counts = await self._chats.count_messages_by_chat_ids(
-            [chat.id or "" for chat in chats if chat.id],
-        )
-        chat_lookup = {chat.id or "": chat for chat in chats if chat.id}
-        selected_chat_id = (
-            chat_id if chat_id and chat_id in chat_lookup else (chats[0].id if chats else None)
-        )
-        selected_chat = (
-            await self._chats.get_owned_chat(
-                user.id or "",
-                agent.id or "",
-                selected_chat_id,
-                include_messages=False,
-            )
-            if selected_chat_id
-            else None
-        )
-        total_count = message_counts.get(selected_chat.id or "", 0) if selected_chat else 0
-        messages = (
-            await self._chats.list_messages(selected_chat.id or "", limit=MESSAGE_WINDOW_SIZE)
-            if selected_chat
-            else []
-        )
-        pages = [(chat, message_counts.get(chat.id or "", 0)) for chat in chats]
-        return self._agent_response(agent), pages, selected_chat, messages, total_count
-
     async def list_agent_response_pages(
         self,
         agent_id: str,
