@@ -170,6 +170,18 @@ class AgentKnowledgeUploadResponse(BaseModel):
     character_count: int
 
 
+class AgentKnowledgeExtractionJobResponse(BaseModel):
+    job_id: str
+    status: str
+    file_name: str
+    content_type: str
+    character_count: int = 0
+    extracted_text: str | None = None
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class AgentRegistryRebuildResponse(BaseModel):
     total_agents: int
     active_agents: int
@@ -235,4 +247,3 @@ class AgentResponse(AgentBase):
     queries_30d: int = 0
     created_at: datetime
     updated_at: datetime
-

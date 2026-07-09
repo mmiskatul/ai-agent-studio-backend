@@ -1,9 +1,10 @@
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Response, UploadFile, status
 
 from app.core.config import settings
 from app.dependencies import get_current_user, get_service_factory
 from app.factories.service_factory import ServiceFactory
 from app.models.base import now_utc
+from app.models.knowledge_extraction_job import KnowledgeExtractionJobDocument
 from app.models.user import UserDocument
 from app.schemas.agent import (
     AgentAICreate,
@@ -12,6 +13,7 @@ from app.schemas.agent import (
     AgentCreate,
     AgentDescriptionGenerateRequest,
     AgentDescriptionGenerateResponse,
+    AgentKnowledgeExtractionJobResponse,
     AgentKnowledgeUploadResponse,
     AgentRegistryRebuildResponse,
     AgentResponsePage,
@@ -38,6 +40,20 @@ from app.tools.registry import default_tool_registry
 router = APIRouter()
 
 ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json"}
+
+
+def _knowledge_job_response(job: KnowledgeExtractionJobDocument) -> AgentKnowledgeExtractionJobResponse:
+    return AgentKnowledgeExtractionJobResponse(
+        job_id=job.id or "",
+        status=job.status,
+        file_name=job.file_name,
+        content_type=job.content_type,
+        character_count=job.character_count,
+        extracted_text=job.extracted_text,
+        error=job.error,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+    )
 
 
 @router.get("", response_model=list[AgentResponse])
@@ -208,6 +224,85 @@ async def extract_agent_knowledge(
         extracted_text=extracted_text,
         character_count=len(extracted_text),
     )
+
+
+async def _process_knowledge_extraction_job(
+    *,
+    job_id: str,
+    file_name: str,
+    content_type: str | None,
+    content: bytes,
+    factory: ServiceFactory,
+):
+    await factory.knowledge_extraction_jobs.update_status(job_id, status="running")
+    try:
+        extracted_text = factory.agent_service.extract_knowledge_text(
+            file_name=file_name,
+            content_type=content_type,
+            content=content,
+        )
+        if not extracted_text:
+            raise ValueError("Could not extract any readable text from the uploaded file.")
+        await factory.knowledge_extraction_jobs.update_status(
+            job_id,
+            status="completed",
+            extracted_text=extracted_text,
+            character_count=len(extracted_text),
+        )
+    except Exception as exc:
+        await factory.knowledge_extraction_jobs.update_status(
+            job_id,
+            status="failed",
+            error=str(exc).strip() or "Extraction failed.",
+        )
+
+
+@router.post("/knowledge/extract-jobs", response_model=AgentKnowledgeExtractionJobResponse, status_code=status.HTTP_202_ACCEPTED)
+async def create_agent_knowledge_extraction_job(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    suffix = ""
+    if file.filename and "." in file.filename:
+        suffix = "." + file.filename.rsplit(".", 1)[-1].lower()
+    if suffix not in ALLOWED_KNOWLEDGE_EXTENSIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported file type. Use PDF, TXT, MD, CSV, or JSON.",
+        )
+
+    content = await file.read()
+    job = await factory.knowledge_extraction_jobs.create(
+        KnowledgeExtractionJobDocument(
+            user_id=current_user.id or "",
+            status="pending",
+            file_name=file.filename or "upload.txt",
+            content_type=file.content_type or "application/octet-stream",
+        )
+    )
+    background_tasks.add_task(
+        _process_knowledge_extraction_job,
+        job_id=job.id or "",
+        file_name=job.file_name,
+        content_type=job.content_type,
+        content=content,
+        factory=factory,
+    )
+    return _knowledge_job_response(job)
+
+
+@router.get("/knowledge/extract-jobs/{job_id}", response_model=AgentKnowledgeExtractionJobResponse)
+async def get_agent_knowledge_extraction_job(
+    job_id: str,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+):
+    job = await factory.knowledge_extraction_jobs.get_owned(job_id, current_user.id or "")
+    if job is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Knowledge extraction job not found.")
+    return _knowledge_job_response(job)
 
 
 @router.get("/response/pages", response_model=list[AgentResponsePage])

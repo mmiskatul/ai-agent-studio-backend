@@ -7,6 +7,7 @@ from app.services.chat_service import ChatService
 from app.services.multi_chat_service import MultiChatService
 from app.services.overview_service import OverviewService
 from app.services.template_service import TemplateService
+from app.repositories.knowledge_extraction_job_repository import KnowledgeExtractionJobRepository
 
 
 class ServiceFactory:
@@ -47,3 +48,7 @@ class ServiceFactory:
     @cached_property
     def template_service(self) -> TemplateService:
         return TemplateService(self._uow.templates)
+
+    @property
+    def knowledge_extraction_jobs(self) -> KnowledgeExtractionJobRepository:
+        return self._uow.knowledge_extraction_jobs

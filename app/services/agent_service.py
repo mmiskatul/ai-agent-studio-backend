@@ -4,6 +4,7 @@ from datetime import timedelta
 from functools import lru_cache
 from logging import getLogger
 from pathlib import Path
+from time import perf_counter
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
@@ -138,6 +139,15 @@ class AgentService:
         if memory.open_loops:
             summary_parts.append("Open Loops: " + "; ".join(memory.open_loops))
         return "\n".join(summary_parts).strip()
+
+    def _log_timed_operation(self, operation: str, started_at: float, **extra: object) -> None:
+        if not settings.request_timing_enabled:
+            return
+        duration_ms = (perf_counter() - started_at) * 1000
+        log_level = logger.warning if duration_ms >= settings.request_slow_log_ms else logger.info
+        extra_text = " ".join(f"{key}={value}" for key, value in extra.items() if value is not None)
+        suffix = f" {extra_text}" if extra_text else ""
+        log_level("service_timing operation=%s duration_ms=%.2f%s", operation, duration_ms, suffix)
 
     async def list_agents(self, user: UserDocument) -> list[AgentResponse]:
         user_id = user.id or ""
@@ -340,8 +350,12 @@ class AgentService:
         message_counts = await self._chats.count_messages_by_chat_ids(
             [chat.id or "" for chat in chats if chat.id],
         )
-        agents = await self._agents.list_by_user(user.id or "")
-        agent_names = {agent.id or "": agent.name for agent in agents if agent.id}
+        agent_summaries = await self._agents.list_summaries_by_user(user.id or "")
+        agent_names = {
+            str(agent.get("_id")): agent.get("name")
+            for agent in agent_summaries
+            if agent.get("_id") and isinstance(agent.get("name"), str)
+        }
 
         for chat in chats:
             if not chat.agent_name:
@@ -746,6 +760,7 @@ class AgentService:
             )
 
         client = _get_openai_client(settings.openai_api_key)
+        started_at = perf_counter()
         try:
             response = await client.responses.create(
                 model=config.model or settings.default_llm_engine,
@@ -754,11 +769,23 @@ class AgentService:
                 temperature=config.temperature,
             )
         except (APIConnectionError, APIError, APIStatusError, RateLimitError):
+            self._log_timed_operation(
+                "generate_memory_response.openai_error",
+                started_at,
+                agent_id=agent.id or "",
+                model=config.model or settings.default_llm_engine,
+            )
             return self._fallback_agent_response(
                 config,
                 current_message.content,
                 self._memory_context_text(memory),
             )
+        self._log_timed_operation(
+            "generate_memory_response.openai",
+            started_at,
+            agent_id=agent.id or "",
+            model=config.model or settings.default_llm_engine,
+        )
 
         output_text = getattr(response, "output_text", None)
         if output_text and output_text.strip():
@@ -1068,7 +1095,7 @@ class AgentService:
         user_id: str,
         agent_ids: list[str] | None = None,
     ) -> dict[str, int]:
-        chats = await self._chats.list_by_user(user_id)
+        chats = await self._chats.list_by_user(user_id, include_messages=False)
         if agent_ids is not None:
             allowed_agent_ids = set(agent_ids)
             chats = [chat for chat in chats if chat.agent_id in allowed_agent_ids]
@@ -1350,14 +1377,25 @@ class AgentService:
             return fallback
 
         client = _get_openai_client(settings.openai_api_key)
+        started_at = perf_counter()
         try:
             response = await client.responses.create(
                 model=settings.default_llm_engine,
                 input=input_text,
             )
         except Exception:
+            self._log_timed_operation(
+                "generate_text.openai_error",
+                started_at,
+                model=settings.default_llm_engine,
+            )
             logger.exception("Text generation failed; using fallback generated text.")
             return fallback
+        self._log_timed_operation(
+            "generate_text.openai",
+            started_at,
+            model=settings.default_llm_engine,
+        )
 
         output_text = getattr(response, "output_text", None)
         if output_text:
@@ -1557,6 +1595,7 @@ class AgentService:
         content_type: str | None,
         content: bytes,
     ) -> str:
+        started_at = perf_counter()
         suffix = Path(file_name).suffix.lower()
         normalized_content_type = (content_type or "").lower()
 
@@ -1568,14 +1607,28 @@ class AgentService:
             reader = PdfReader(BytesIO(content))
             extracted_pages = [page.extract_text() or "" for page in reader.pages]
             text = "\n\n".join(part.strip() for part in extracted_pages if part.strip())
-            return self._normalize_knowledge_text(text)
+            normalized_text = self._normalize_knowledge_text(text)
+            self._log_timed_operation(
+                "extract_knowledge_text.pdf",
+                started_at,
+                file_name=file_name,
+                characters=len(normalized_text),
+            )
+            return normalized_text
 
         try:
             decoded = content.decode("utf-8")
         except UnicodeDecodeError:
             decoded = content.decode("latin-1", errors="ignore")
 
-        return self._normalize_knowledge_text(decoded)
+        normalized_text = self._normalize_knowledge_text(decoded)
+        self._log_timed_operation(
+            "extract_knowledge_text.text",
+            started_at,
+            file_name=file_name,
+            characters=len(normalized_text),
+        )
+        return normalized_text
 
     async def delete_agent(self, agent_id: str, user: UserDocument) -> None:
         deleted = await self._agents.delete_owned(agent_id, user.id or "")
