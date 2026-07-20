@@ -15,7 +15,7 @@ class AgentBase(BaseModel):
     id: str | None = Field(default=None, alias="_id")
     name: str = Field(min_length=1)
     role: str = Field(min_length=1)
-    purpose: str = Field(default="", max_length=2000)
+    purpose: str = Field(default="")
     description: str | None = None
     knowledge_text: str | None = None
     language: AgentLanguage = "EN"
@@ -40,7 +40,7 @@ class AgentCreate(AgentBase):
 
 class AgentAICreate(BaseModel):
     name: str = Field(min_length=1)
-    purpose: str = Field(min_length=1, max_length=2000)
+    purpose: str = Field(min_length=1)
     role: str | None = Field(default=None, min_length=1)
     template_type: str | None = None
     template_id: str | None = None
@@ -52,7 +52,7 @@ class AgentAICreate(BaseModel):
 
 class AgentBuilderCreate(BaseModel):
     name: str = Field(min_length=1)
-    short_description: str = Field(min_length=1, max_length=2000)
+    short_description: str = Field(min_length=1)
     base_template: str = "blank"
     template_id: str | None = None
     category_tag: str | None = None
@@ -199,7 +199,7 @@ class AgentDescriptionGenerateResponse(BaseModel):
 
 class AgentSystemPromptGenerateRequest(BaseModel):
     name: str = Field(min_length=1)
-    short_description: str = Field(min_length=1, max_length=2000)
+    short_description: str = Field(min_length=1)
     category_tag: str | None = None
     base_template: str | None = None
 
@@ -210,7 +210,7 @@ class AgentSystemPromptGenerateResponse(BaseModel):
 
 class AgentWelcomeMessageGenerateRequest(BaseModel):
     name: str = Field(min_length=1)
-    short_description: str = Field(min_length=1, max_length=2000)
+    short_description: str = Field(min_length=1)
     category_tag: str | None = None
     base_template: str | None = None
 
@@ -222,7 +222,7 @@ class AgentWelcomeMessageGenerateResponse(BaseModel):
 class AgentUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     role: str | None = Field(default=None, min_length=1)
-    purpose: str | None = Field(default=None, min_length=1, max_length=2000)
+    purpose: str | None = Field(default=None, min_length=1)
     description: str | None = None
     language: AgentLanguage | None = None
     template_type: str | None = None
