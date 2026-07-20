@@ -43,13 +43,29 @@ def _infer_tool_names_cached(
     return tuple(tools)
 
 
+def _detect_message_language(message: str, fallback: str) -> str:
+    text = message.strip().lower()
+    if not text:
+        return fallback
+    if re.search(r"[а-яё]", text):
+        return "RU"
+    german_markers = (" der ", " die ", " das ", " und ", " ist ", " nicht ", " bitte ", " ich ")
+    if any(marker in f" {text} " for marker in german_markers) or any(char in text for char in "äöüß"):
+        return "DE"
+    return "EN"
+
+
 @lru_cache(maxsize=512)
-def _runtime_system_prompt_cached(system_prompt: str, language: str) -> str:
+def _runtime_system_prompt_cached(system_prompt: str, language: str, knowledge_text: str) -> str:
     return (
         f"{system_prompt.strip()}\n\n"
         f"Language rules:\n"
-        "- Match the language of the user's latest message by default.\n"
-        f"- Use {language} only as the fallback language when the user's language is unclear.\n"
+        "- Detect the language of the user's latest message and answer entirely in that language.\n"
+        f"- Use {language} only when the latest message is too short or unclear to classify.\n"
+        "- Treat prices, currencies, discounts, taxes, eligibility, dates, and payment terms in agent-owned knowledge as authoritative.\n"
+        "- Apply the most specific matching price rule; never combine incompatible discounts or invent a price.\n"
+        "Agent-owned knowledge (use only this agent's content):\n"
+        f"{knowledge_text.strip()[:30000] or 'None'}\n\n"
         "- Keep the full response in one language unless the user clearly requests another behavior.\n\n"
         "High-quality response rules:\n"
         "- Answer the user's exact request first; do not introduce yourself or repeat the agent description.\n"
@@ -395,7 +411,7 @@ class ChatService:
         content: str,
         messages: list[MessageDocument] | None = None,
     ) -> str:
-        runtime_agent = self._build_agent_runtime_config(agent)
+        runtime_agent = self._build_agent_runtime_config(agent, content)
         history = self._message_history(messages or [], current_message=content)
         platform = AgentPlatform(
             configs=[runtime_agent],
@@ -404,21 +420,22 @@ class ChatService:
         )
         return await platform.run(content, agent_key=runtime_agent.id, history=history)
 
-    def _build_agent_runtime_config(self, agent: AgentDocument) -> AgentConfig:
+    def _build_agent_runtime_config(self, agent: AgentDocument, message: str = "") -> AgentConfig:
         return AgentConfig(
             id=agent.id or agent.name,
             name=agent.name,
             role=agent.role,
             description=agent.purpose,
-            system_prompt=self._build_runtime_system_prompt(agent),
+            system_prompt=self._build_runtime_system_prompt(agent, message),
             tools=agent.tools or self._infer_tool_names(agent),
             model=agent.model or agent.llm_engine or settings.default_llm_engine,
             temperature=agent.temperature,
             is_active=agent.is_active and agent.status == "enabled",
         )
 
-    def _build_runtime_system_prompt(self, agent: AgentDocument) -> str:
-        return _runtime_system_prompt_cached(agent.system_prompt, agent.language)
+    def _build_runtime_system_prompt(self, agent: AgentDocument, message: str = "") -> str:
+        detected_language = _detect_message_language(message, agent.language)
+        return _runtime_system_prompt_cached(agent.system_prompt, detected_language, agent.knowledge_text or "")
 
     def _infer_tool_names(self, agent: AgentDocument) -> list[str]:
         return list(
