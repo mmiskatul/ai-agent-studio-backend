@@ -40,7 +40,7 @@ from app.tools.registry import default_tool_registry
 router = APIRouter()
 
 ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json"}
-MAX_KNOWLEDGE_UPLOAD_BYTES = 5 * 1024 * 1024
+MAX_KNOWLEDGE_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
 def _knowledge_job_response(job: KnowledgeExtractionJobDocument) -> AgentKnowledgeExtractionJobResponse:
@@ -211,7 +211,7 @@ async def extract_agent_knowledge(
     if len(content) > MAX_KNOWLEDGE_UPLOAD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File is too large. Knowledge uploads must be 5 MB or smaller.",
+            detail="File is too large. Knowledge uploads must be 25 MB or smaller.",
         )
     extracted_text = factory.agent_service.extract_knowledge_text(
         file_name=file.filename or "upload.txt",
@@ -283,7 +283,7 @@ async def create_agent_knowledge_extraction_job(
     if len(content) > MAX_KNOWLEDGE_UPLOAD_BYTES:
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail="File is too large. Knowledge uploads must be 5 MB or smaller.",
+            detail="File is too large. Knowledge uploads must be 25 MB or smaller.",
         )
     job = await factory.knowledge_extraction_jobs.create(
         KnowledgeExtractionJobDocument(
