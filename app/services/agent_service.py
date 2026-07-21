@@ -1630,6 +1630,68 @@ class AgentService:
         )
         return normalized_text
 
+    async def extract_knowledge_text_with_ai(
+        self,
+        *,
+        file_name: str,
+        content_type: str | None,
+        content: bytes,
+    ) -> str:
+        """Extract and normalize document knowledge with the configured AI model.
+
+        The local parser remains a deterministic fallback when an AI provider is
+        unavailable, but PDFs are sent as files so scanned/layout-heavy content
+        can be interpreted by the model instead of relying on OCR alone.
+        """
+        fallback = self.extract_knowledge_text(
+            file_name=file_name,
+            content_type=content_type,
+            content=content,
+        )
+        if not settings.openai_api_key:
+            return fallback
+
+        try:
+            client = _get_openai_client(settings.openai_api_key)
+            suffix = Path(file_name).suffix.lower()
+            if suffix == ".pdf" or (content_type or "").lower() == "application/pdf":
+                import base64
+
+                data_url = f"data:{content_type or 'application/pdf'};base64,{base64.b64encode(content).decode('ascii')}"
+                input_content = [
+                    {
+                        "type": "input_file",
+                        "filename": file_name,
+                        "file_data": data_url,
+                    },
+                    {
+                        "type": "input_text",
+                        "text": "Extract all useful factual knowledge from this document.",
+                    },
+                ]
+            else:
+                input_content = [
+                    {
+                        "type": "input_text",
+                        "text": f"Extract and normalize this document text:\n\n{fallback}",
+                    },
+                ]
+            response = await client.responses.create(
+                model=settings.default_llm_engine,
+                instructions=(
+                    "Extract factual knowledge for an AI agent. Preserve names, numbers, prices, "
+                    "currencies, dates, rules, eligibility, and exceptions exactly. Remove boilerplate, "
+                    "do not invent or summarize away important details, and return only clean structured "
+                    "plain text suitable for a knowledge base."
+                ),
+                input=[{"role": "user", "content": input_content}],
+            )
+            output_text = getattr(response, "output_text", None)
+            if output_text and output_text.strip():
+                return self._normalize_knowledge_text(output_text)
+        except Exception:
+            logger.exception("AI knowledge extraction failed; using parser fallback", extra={"file_name": file_name})
+        return fallback
     async def delete_agent(self, agent_id: str, user: UserDocument) -> None:
         deleted = await self._agents.delete_owned(agent_id, user.id or "")
         if not deleted:

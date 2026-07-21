@@ -213,7 +213,7 @@ async def extract_agent_knowledge(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail="File is too large. Knowledge uploads must be 25 MB or smaller.",
         )
-    extracted_text = factory.agent_service.extract_knowledge_text(
+    extracted_text = await factory.agent_service.extract_knowledge_text_with_ai(
         file_name=file.filename or "upload.txt",
         content_type=file.content_type,
         content=content,
@@ -242,7 +242,7 @@ async def _process_knowledge_extraction_job(
 ):
     await factory.knowledge_extraction_jobs.update_status(job_id, status="running")
     try:
-        extracted_text = factory.agent_service.extract_knowledge_text(
+        extracted_text = await factory.agent_service.extract_knowledge_text_with_ai(
             file_name=file_name,
             content_type=content_type,
             content=content,
