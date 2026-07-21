@@ -39,7 +39,7 @@ from app.tools.registry import default_tool_registry
 
 router = APIRouter()
 
-ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json"}
+ALLOWED_KNOWLEDGE_EXTENSIONS = {".pdf", ".txt", ".md", ".csv", ".json", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
 MAX_KNOWLEDGE_UPLOAD_BYTES = 25 * 1024 * 1024
 
 
@@ -201,7 +201,7 @@ async def extract_agent_knowledge(
     suffix = ""
     if file.filename and "." in file.filename:
         suffix = "." + file.filename.rsplit(".", 1)[-1].lower()
-    if suffix not in ALLOWED_KNOWLEDGE_EXTENSIONS:
+    if suffix not in ALLOWED_KNOWLEDGE_EXTENSIONS and not (file.content_type or "").lower().startswith("image/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported file type. Use PDF, TXT, MD, CSV, or JSON.",
@@ -273,7 +273,7 @@ async def create_agent_knowledge_extraction_job(
     suffix = ""
     if file.filename and "." in file.filename:
         suffix = "." + file.filename.rsplit(".", 1)[-1].lower()
-    if suffix not in ALLOWED_KNOWLEDGE_EXTENSIONS:
+    if suffix not in ALLOWED_KNOWLEDGE_EXTENSIONS and not (file.content_type or "").lower().startswith("image/"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported file type. Use PDF, TXT, MD, CSV, or JSON.",

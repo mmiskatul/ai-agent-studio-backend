@@ -1654,21 +1654,18 @@ class AgentService:
         try:
             client = _get_openai_client(settings.openai_api_key)
             suffix = Path(file_name).suffix.lower()
-            if suffix == ".pdf" or (content_type or "").lower() == "application/pdf":
+            is_pdf = suffix == ".pdf" or (content_type or "").lower() == "application/pdf"
+            is_image = (content_type or "").lower().startswith("image/") or suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
+            if is_pdf or is_image:
                 import base64
 
-                data_url = f"data:{content_type or 'application/pdf'};base64,{base64.b64encode(content).decode('ascii')}"
-                input_content = [
-                    {
-                        "type": "input_file",
-                        "filename": file_name,
-                        "file_data": data_url,
-                    },
-                    {
-                        "type": "input_text",
-                        "text": "Extract all useful factual knowledge from this document.",
-                    },
-                ]
+                mime_type = content_type or ("image/png" if is_image else "application/pdf")
+                data_url = f"data:{mime_type};base64,{base64.b64encode(content).decode('ascii')}"
+                input_content = (
+                    [{"type": "input_image", "image_url": data_url}]
+                    if is_image
+                    else [{"type": "input_file", "filename": file_name, "file_data": data_url}]
+                )
             else:
                 input_content = [
                     {
