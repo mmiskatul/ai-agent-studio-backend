@@ -7,6 +7,7 @@ from app.core.config import settings
 from app.core.security import email_code_generator, password_hasher, token_service
 from app.models.user import UserDocument
 from app.repositories.agent_repository import AgentRepository
+from app.utils.ids import create_id
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
@@ -56,6 +57,7 @@ class AuthService:
         if existing is None:
             user = await self._users.create(
                 UserDocument(
+                    id=create_id("user"),
                     email=email,
                     hashed_password=password_hasher.hash(payload.password),
                     email_verification_code=code,
