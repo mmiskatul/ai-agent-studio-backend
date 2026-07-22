@@ -25,12 +25,13 @@ async def get_current_user(
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing bearer token")
 
-    user_id = token_service.decode_subject(credentials.credentials)
-    if user_id is None:
+    decoded_access = token_service.decode_access(credentials.credentials)
+    if decoded_access is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid bearer token")
 
+    user_id, session_version = decoded_access
     user = await factory.auth_service.get_user_by_id(user_id)
-    if user is None:
+    if user is None or user.session_version != session_version:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User no longer exists")
 
     return user

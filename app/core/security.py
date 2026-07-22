@@ -20,17 +20,43 @@ class PasswordHasher:
 
 
 class TokenService:
-    def create_access_token(self, subject: str) -> str:
+    def create_access_token(self, subject: str, session_version: int = 0) -> str:
         expires_at = datetime.now(timezone.utc) + timedelta(
             minutes=settings.jwt_access_token_expire_minutes,
         )
-        payload = {"sub": subject, "exp": expires_at, "typ": "access"}
+        payload = {"sub": subject, "exp": expires_at, "typ": "access", "ver": session_version}
         return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
-    def create_session_token(self, subject: str) -> str:
+    def create_session_token(self, subject: str, session_version: int = 0) -> str:
         expires_at = datetime.now(timezone.utc) + timedelta(days=settings.jwt_session_token_expire_days)
-        payload = {"sub": subject, "exp": expires_at, "typ": "session"}
+        payload = {"sub": subject, "exp": expires_at, "typ": "session", "ver": session_version}
         return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+    def decode_access(self, token: str) -> tuple[str, int] | None:
+        try:
+            payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+            if payload.get("typ") != "access":
+                return None
+            subject = payload.get("sub")
+            version = payload.get("ver", 0)
+            if not isinstance(subject, str) or not isinstance(version, int):
+                return None
+            return subject, version
+        except JWTError:
+            return None
+
+    def decode_session(self, token: str) -> tuple[str, int] | None:
+        try:
+            payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
+            if payload.get("typ") != "session":
+                return None
+            subject = payload.get("sub")
+            version = payload.get("ver", 0)
+            if not isinstance(subject, str) or not isinstance(version, int):
+                return None
+            return subject, version
+        except JWTError:
+            return None
 
     def decode_subject(self, token: str, token_type: str = "access") -> str | None:
         try:

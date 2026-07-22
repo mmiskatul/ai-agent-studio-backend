@@ -6,6 +6,7 @@ from app.models.user import UserDocument
 from app.schemas.auth import (
     AccessTokenResponse,
     AuthUserResponse,
+    ChangePasswordRequest,
     EmailValidationRequiredResponse,
     EmailValidationRequest,
     ForgotPasswordRequest,
@@ -96,6 +97,22 @@ async def reset_forgot_password(
 ) -> MessageResponse:
     return await factory.auth_service.reset_password(payload)
 
+
+@router.post("/change-password", response_model=MessageResponse)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+) -> MessageResponse:
+    return await factory.auth_service.change_password(current_user, payload)
+
+
+@router.post("/logout-all", response_model=MessageResponse)
+async def logout_all(
+    current_user: UserDocument = Depends(get_current_user),
+    factory: ServiceFactory = Depends(get_service_factory),
+) -> MessageResponse:
+    return await factory.auth_service.revoke_all_sessions(current_user)
 
 @router.get("/me", response_model=AuthUserResponse)
 async def me(current_user: UserDocument = Depends(get_current_user)) -> AuthUserResponse:

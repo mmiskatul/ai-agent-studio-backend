@@ -12,6 +12,7 @@ from app.repositories.chat_repository import ChatRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.auth import (
     AccessTokenResponse,
+    ChangePasswordRequest,
     EmailValidationRequiredResponse,
     EmailValidationRequest,
     ForgotPasswordRequest,
@@ -157,19 +158,48 @@ class AuthService:
         if updated_user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
+        await self._users.update_by_id(user.id or "", {"session_version": user.session_version + 1})
         return MessageResponse(message="Password updated successfully")
 
+    async def change_password(self, user: UserDocument, payload: ChangePasswordRequest) -> MessageResponse:
+        if not password_hasher.verify(payload.current_password, user.hashed_password):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Current password is incorrect")
+
+        updated_user = await self._users.update_by_id(
+            user.id or "",
+            {
+                "hashed_password": password_hasher.hash(payload.new_password),
+                "session_version": user.session_version + 1,
+                "updated_at": datetime.now(timezone.utc),
+            },
+        )
+        if updated_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return MessageResponse(message="Password changed successfully. All active sessions have been signed out.")
+
+    async def revoke_all_sessions(self, user: UserDocument) -> MessageResponse:
+        updated_user = await self._users.update_by_id(
+            user.id or "",
+            {
+                "session_version": user.session_version + 1,
+                "updated_at": datetime.now(timezone.utc),
+            },
+        )
+        if updated_user is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+        return MessageResponse(message="All active sessions have been signed out")
+
     async def refresh_access_token(self, payload: RefreshTokenRequest) -> AccessTokenResponse:
-        user_id = token_service.decode_subject(payload.session_token, token_type="session")
-        if user_id is None:
+        decoded_session = token_service.decode_session(payload.session_token)
+        if decoded_session is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session token")
+        user_id, session_version = decoded_session
 
         user = await self.get_user_by_id(user_id)
-        if user is None or not user.is_active:
+        if user is None or not user.is_active or session_version != user.session_version:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
 
-        return AccessTokenResponse(access_token=token_service.create_access_token(user.id or ""))
-
+        return AccessTokenResponse(access_token=token_service.create_access_token(user.id or "", session_version=user.session_version))
     async def get_user_by_id(self, user_id: str) -> UserDocument | None:
         return await self._users.get_by_id(user_id)
 
@@ -248,8 +278,8 @@ class AuthService:
         return await self.get_profile(updated_user)
 
     def _token_response(self, user: UserDocument) -> TokenResponse:
-        access_token = token_service.create_access_token(subject=user.id or "")
-        session_token = token_service.create_session_token(subject=user.id or "")
+        access_token = token_service.create_access_token(subject=user.id or "", session_version=user.session_version)
+        session_token = token_service.create_session_token(subject=user.id or "", session_version=user.session_version)
         return TokenResponse(
             access_token=access_token,
             session_token=session_token,

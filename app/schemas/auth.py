@@ -45,6 +45,11 @@ class RefreshTokenRequest(BaseModel):
     session_token: str = Field(min_length=1)
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=6)
+
+
 class AuthUserResponse(BaseModel):
     id: str
     email: EmailStr

@@ -16,3 +16,4 @@ class UserDocument(MongoDocument):
     email_verification_expires_at: datetime | None = None
     password_reset_code: str | None = None
     password_reset_expires_at: datetime | None = None
+    session_version: int = 0
