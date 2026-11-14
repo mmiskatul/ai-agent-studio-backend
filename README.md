@@ -73,6 +73,9 @@ Key environment variables:
 
 | Variable | Description |
 |---|---|
+| `MONGODB_URI`, `MONGODB_DB_NAME` | MongoDB connection and database name |
+| `JWT_SECRET_KEY` | Secret for signing tokens |
+| `BACKEND_CORS_ORIGINS` | Allowed CORS origins |
 | `OPENAI_API_KEY` | OpenAI key. If empty, agents use the deterministic fallback. |
 | `OPENAI_AGENT_MODEL` | Model name (default `gpt-4.1-mini`) |
 
